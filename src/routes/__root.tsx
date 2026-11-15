@@ -83,7 +83,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { name: "viewport", content: "width=device-width, initial-scale=1" },
       { title: "بیسیم آفلاین" },
       { name: "description", content: "بیسیم آفلاین روی وای‌فای و هات‌اسپات محلی" },
-      { name: "theme-color", content: "#2b2e24" },
+      { name: "theme-color", content: "#14171f" },
     ],
     links: [
       {
@@ -95,7 +95,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
       {
         rel: "stylesheet",
-        href: "https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Vazirmatn:wght@400;600;800&display=swap",
+        href: "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Vazirmatn:wght@400;600;800&display=swap",
       },
     ],
   }),

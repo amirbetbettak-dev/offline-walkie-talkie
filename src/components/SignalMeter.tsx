@@ -41,7 +41,7 @@ export function SignalMeter({
           className={cn(
             "w-1.5 rounded-[1px] transition-opacity",
             i < lit ? "opacity-100" : "opacity-20",
-            "bg-lcd-foreground",
+            "bg-current",
           )}
           style={{ height: `${30 + i * 7}%` }}
         />

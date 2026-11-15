@@ -30,7 +30,7 @@ export const UDP_PORT = 47474;
 
 export const isNativeApp = () => Capacitor.isNativePlatform();
 
-export function useLoudspeaker() {
+export function routeToLoudspeaker() {
   if (isNativeApp()) BisimUdp.useSpeaker().catch(() => {});
 }
 

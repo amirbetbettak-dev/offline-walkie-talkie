@@ -5,7 +5,7 @@ import { channelFrequency, decodePcm, encodePcm, shouldAccept, type RadioMessage
 import {
   createUdpTransport,
   isNativeApp,
-  useLoudspeaker,
+  routeToLoudspeaker,
   type Transport,
   type TransportStatus,
 } from "@/lib/radio/transport";
@@ -179,7 +179,7 @@ export function useRadio() {
       audio.current.setVolume(volume);
       audio.current.effect = effect;
       await audio.current.initMic();
-      useLoudspeaker();
+      routeToLoudspeaker();
       setPower(true);
       audio.current.roger();
     } catch {

@@ -52,3 +52,20 @@ export function decodePcm(b64: string): Int16Array {
   for (let i = 0; i < s.length; i++) bytes[i] = s.charCodeAt(i);
   return new Int16Array(bytes.buffer);
 }
+
+/** Every packet carries a per-sender sequence number `s`. */
+export type Packet = RadioMessage & { s: number };
+
+/**
+ * A phone can hear the same broadcast on more than one network path; drop repeats
+ * and stale packets so audio never plays twice.
+ */
+export function createDeduper() {
+  const last = new Map<string, number>();
+  return (p: Packet): boolean => {
+    const prev = last.get(p.id);
+    if (prev !== undefined && p.s <= prev && prev - p.s < 10000) return false;
+    last.set(p.id, p.s);
+    return true;
+  };
+}

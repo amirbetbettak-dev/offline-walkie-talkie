@@ -38,3 +38,12 @@ it("audio frames survive encoding", () => {
   const pcm = new Int16Array([0, 1, -1, 32767, -32768, 1234]);
   expect([...decodePcm(encodePcm(pcm))]).toEqual([...pcm]);
 });
+
+it("a packet heard twice plays only once", async () => {
+  const { createDeduper } = await import("@/lib/radio/protocol");
+  const fresh = createDeduper();
+  const p = { t: "audio" as const, id: "a", freq: 446.00625, data: "", s: 5 };
+  expect(fresh(p)).toBe(true);
+  expect(fresh(p)).toBe(false);
+  expect(fresh({ ...p, s: 6 })).toBe(true);
+});

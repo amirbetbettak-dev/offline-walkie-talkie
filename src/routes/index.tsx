@@ -247,7 +247,7 @@ function SettingsSheet({ r }: { r: ReturnType<typeof useRadio> }) {
             <Input id="name" value={r.name} maxLength={20} onChange={(e) => r.setName(e.target.value)} />
           </Field>
           <Field label="بلندی صدا">
-            <Slider value={[r.volume * 100]} max={100} step={1} onValueChange={([v]) => r.setVolume(v / 100)} />
+            <Slider value={[r.volume * 100]} max={100} step={1} onValueChange={([v]) => r.setVolume((v ?? 0) / 100)} />
           </Field>
           <div className="flex items-center justify-between">
             <div>

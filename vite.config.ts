@@ -10,7 +10,7 @@
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
 // CAPACITOR=1 builds a static SPA into dist/client (index.html) for the Android app.
-const native = process.env.CAPACITOR === "1";
+const native = process.env["CAPACITOR"] === "1";
 
 export default defineConfig({
   ...(native ? { nitro: false } : {}),

@@ -90,7 +90,7 @@ export class RadioAudio {
         const start = Math.floor(i * ratio);
         const end = Math.min(input.length, Math.floor((i + 1) * ratio));
         let acc = 0;
-        for (let j = start; j < end; j++) acc += input[j];
+        for (let j = start; j < end; j++) acc += input[j] ?? 0;
         const s = Math.max(-1, Math.min(1, acc / Math.max(1, end - start)));
         sum += s * s;
         out[i] = s * 0x7fff;
@@ -115,7 +115,7 @@ export class RadioAudio {
     if (!pcm.length) return;
     const buf = c.createBuffer(1, pcm.length, SAMPLE_RATE);
     const ch = buf.getChannelData(0);
-    for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 0x7fff;
+    for (let i = 0; i < pcm.length; i++) ch[i] = (pcm[i] ?? 0) / 0x7fff;
     const s = c.createBufferSource();
     s.buffer = buf;
     s.connect(this.effect ? this.fxIn : this.dryIn);

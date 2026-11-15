@@ -28,3 +28,9 @@ use the editor.
   own key and store it in Secrets.
 - **Secrets.** Lovable manages them. Do not put secret values in the repo.
 <!-- LOVABLE:END -->
+
+## Project rules
+- Voice travels only over the native Capacitor plugin `BisimUdp` (UDP broadcast on the LAN, source in `native/android/`); there is no server, so do not add web relays or cloud transports — the app must work without internet.
+- The browser build cannot reach other phones; real calls happen only in the installed Android app.
+- `CAPACITOR=1` makes `vite.config.ts` emit a static SPA in `dist/client` (nitro off) — that is the Capacitor `webDir`; `scripts/build-android.sh` regenerates `android/` and copies the native Java files, so edit `native/android/`, never `android/`.
+- All wire messages go through `src/lib/radio/protocol.ts`; packets carry a per-sender sequence number so duplicates from multiple network paths are dropped.

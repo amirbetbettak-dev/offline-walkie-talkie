@@ -79,7 +79,7 @@ function Index() {
         {/* Top bar */}
         <header className="flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="grid size-10 place-items-center rounded-2xl bg-primary text-primary-foreground">
+            <div className="grid size-10 place-items-center rounded-2xl bg-primary/15 text-primary">
               <Mic className="size-5" />
             </div>
             <div>
@@ -239,7 +239,7 @@ function SettingsSheet({ r }: { r: ReturnType<typeof useRadio> }) {
         </Button>
       </SheetTrigger>
       <SheetContent side="bottom" className="rounded-t-3xl border-border" dir="rtl">
-        <SheetHeader>
+        <SheetHeader className="pr-12">
           <SheetTitle className="text-right">تنظیمات</SheetTitle>
         </SheetHeader>
         <div className="mx-auto w-full max-w-md space-y-6 px-4 pb-8">

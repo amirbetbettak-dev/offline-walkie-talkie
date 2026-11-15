@@ -1,26 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { RadioAudio } from "@/lib/radio/audio";
+import { channelFrequency, decodePcm, encodePcm, shouldAccept, type RadioMessage } from "@/lib/radio/protocol";
 import {
-  channelFrequency,
-  decodePcm,
-  encodePcm,
-  SAMPLE_RATE,
-  shouldAccept,
-  type RadioMessage,
-} from "@/lib/radio/protocol";
-import {
-  createLanTransport,
-  createLocalTransport,
+  createUdpTransport,
+  isNativeApp,
+  useLoudspeaker,
   type Transport,
   type TransportStatus,
 } from "@/lib/radio/transport";
 
-export type Mode = "local" | "lan";
-export type Peer = { id: string; name: string; freq: number; seen: number; virtual?: boolean };
-
-const VIRTUAL_ID = "virtual-echo";
-const VIRTUAL_NAME = "ایستگاه مجازی";
+export type Peer = { id: string; name: string; freq: number; seen: number };
 
 function loadSetting<T>(key: string, fallback: T): T {
   try {
@@ -37,11 +27,9 @@ export function useRadio() {
   const [power, setPower] = useState(false);
   const [name, setName] = useState("ایستگاه");
   const [freq, setFreq] = useState(channelFrequency(1));
-  const [mode, setMode] = useState<Mode>("local");
-  const [relayUrl, setRelayUrl] = useState("ws://192.168.43.1:8787");
+  const [native, setNative] = useState(true);
   const [volume, setVolume] = useState(0.9);
   const [effect, setEffect] = useState(true);
-  const [echo, setEcho] = useState(false);
   const [status, setStatus] = useState<TransportStatus>("offline");
   const [peers, setPeers] = useState<Peer[]>([]);
   const [tx, setTx] = useState(false);
@@ -54,16 +42,14 @@ export function useRadio() {
   const transport = useRef<Transport | null>(null);
   const peersRef = useRef(new Map<string, Peer>());
   const talkers = useRef(new Map<string, string>()); // id -> name
-  const echoBuf = useRef<Int16Array[]>([]);
-  const st = useRef({ name, freq, echo, tx });
-  st.current = { name, freq, echo, tx };
+  const st = useRef({ name, freq, tx });
+  st.current = { name, freq, tx };
 
   // Load persisted settings after hydration
   useEffect(() => {
     setName(loadSetting("name", "ایستگاه " + Math.floor(Math.random() * 90 + 10)));
     setFreq(loadSetting("freq", channelFrequency(1)));
-    setMode(loadSetting("mode", "local"));
-    setRelayUrl(loadSetting("relay", "ws://192.168.43.1:8787"));
+    setNative(isNativeApp());
     setVolume(loadSetting("volume", 0.9));
     setEffect(loadSetting("effect", true));
     setReady(true);
@@ -71,9 +57,9 @@ export function useRadio() {
 
   useEffect(() => {
     if (!ready) return;
-    const s = { name, freq, mode, relay: relayUrl, volume, effect };
+    const s = { name, freq, volume, effect };
     for (const [k, v] of Object.entries(s)) localStorage.setItem("bisim:" + k, JSON.stringify(v));
-  }, [ready, name, freq, mode, relayUrl, volume, effect]);
+  }, [ready, name, freq, volume, effect]);
 
   useEffect(() => audio.current?.setVolume(volume), [volume]);
   useEffect(() => {
@@ -82,7 +68,7 @@ export function useRadio() {
 
   const refreshPeers = useCallback(() => {
     const now = Date.now();
-    for (const [k, p] of peersRef.current) if (!p.virtual && now - p.seen > 7000) peersRef.current.delete(k);
+    for (const [k, p] of peersRef.current) if (now - p.seen > 7000) peersRef.current.delete(k);
     setPeers([...peersRef.current.values()]);
   }, []);
 
@@ -148,7 +134,7 @@ export function useRadio() {
   useEffect(() => {
     if (!power) return;
     const h = { onMessage: handle, onStatus: setStatus };
-    transport.current = mode === "lan" ? createLanTransport(relayUrl, h) : createLocalTransport(h);
+    transport.current = createUdpTransport(h);
     const beat = setInterval(() => {
       hello();
       refreshPeers();
@@ -160,12 +146,12 @@ export function useRadio() {
       send({ t: "bye", id, freq: st.current.freq });
       transport.current?.close();
       transport.current = null;
-      peersRef.current.forEach((p, k) => !p.virtual && peersRef.current.delete(k));
+      peersRef.current.clear();
       talkers.current.clear();
       setRx(null);
-      setPeers([...peersRef.current.values()]);
+      setPeers([]);
     };
-  }, [power, mode, relayUrl, handle, hello, refreshPeers, send, id]);
+  }, [power, handle, hello, refreshPeers, send, id]);
 
   // Announce new name / frequency right away
   useEffect(() => {
@@ -174,13 +160,6 @@ export function useRadio() {
     setRx(null);
     audio.current?.rxStatic(false);
   }, [power, name, freq, hello]);
-
-  // Virtual echo station for single-device testing
-  useEffect(() => {
-    if (echo) peersRef.current.set(VIRTUAL_ID, { id: VIRTUAL_ID, name: VIRTUAL_NAME, freq, seen: Date.now(), virtual: true });
-    else peersRef.current.delete(VIRTUAL_ID);
-    setPeers([...peersRef.current.values()]);
-  }, [echo, freq]);
 
   useEffect(() => {
     const close = () => send({ t: "bye", id, freq: st.current.freq });
@@ -200,6 +179,7 @@ export function useRadio() {
       audio.current.setVolume(volume);
       audio.current.effect = effect;
       await audio.current.initMic();
+      useLoudspeaker();
       setPower(true);
       audio.current.roger();
     } catch {
@@ -220,13 +200,9 @@ export function useRadio() {
     setTx(true);
     navigator.vibrate?.(25);
     a.chirp();
-    echoBuf.current = [];
     send({ t: "start", id, name: st.current.name, freq: st.current.freq });
     a.startCapture(
-      (pcm) => {
-        send({ t: "audio", id, freq: st.current.freq, data: encodePcm(pcm) });
-        if (st.current.echo) echoBuf.current.push(pcm);
-      },
+      (pcm) => send({ t: "audio", id, freq: st.current.freq, data: encodePcm(pcm) }),
       setLevel,
     );
   }, [power, id, send]);
@@ -241,22 +217,11 @@ export function useRadio() {
     a.roger();
     navigator.vibrate?.(15);
 
-    if (st.current.echo && echoBuf.current.length) {
-      const frames = echoBuf.current;
-      echoBuf.current = [];
-      setTimeout(() => {
-        talkers.current.set(VIRTUAL_ID, VIRTUAL_NAME);
-        updateRx();
-        frames.forEach((f) => a.playFrame(VIRTUAL_ID, f));
-        const dur = frames.reduce((s, f) => s + f.length, 0) / SAMPLE_RATE;
-        setTimeout(() => endTalk(VIRTUAL_ID), dur * 1000);
-      }, 700);
-    }
-  }, [id, send, endTalk]);
+  }, [id, send]);
 
   return {
-    id, power, name, setName, freq, setFreq, mode, setMode, relayUrl, setRelayUrl,
-    volume, setVolume, effect, setEffect, echo, setEcho, status, peers, tx, rx, level,
+    id, native, power, name, setName, freq, setFreq,
+    volume, setVolume, effect, setEffect, status, peers, tx, rx, level,
     error, notice, togglePower, pttDown, pttUp, analyser: () => audio.current?.analyser ?? null,
   };
 }

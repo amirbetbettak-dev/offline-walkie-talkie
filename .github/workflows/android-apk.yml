@@ -14,8 +14,7 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "21"
-      - uses: android-actions/setup-android@v3
+          java-version: '21'
       - run: bun install
       - run: bash scripts/build-android.sh
       - run: cd android && chmod +x gradlew && ./gradlew assembleDebug --no-daemon

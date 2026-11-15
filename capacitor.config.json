@@ -1,0 +1,5 @@
+{
+  "appId": "com.bisim.offline",
+  "appName": "Bisim",
+  "webDir": "dist/client"
+}

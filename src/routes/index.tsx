@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { ChevronLeft, ChevronRight, Minus, Plus, Power, Radio, Users, Wifi, WifiOff } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, type ReactNode } from "react";
 
 import { SignalMeter } from "@/components/SignalMeter";
 import { Button } from "@/components/ui/button";
@@ -263,7 +263,7 @@ function Led({ on, className, label }: { on: boolean; className: string; label: 
   );
 }
 
-function Control(props: { label: string; onDec: () => void; onInc: () => void; decIcon: React.ReactNode; incIcon: React.ReactNode }) {
+function Control(props: { label: string; onDec: () => void; onInc: () => void; decIcon: ReactNode; incIcon: ReactNode }) {
   return (
     <div className="rounded-xl bg-secondary p-2 text-center">
       <div className="mb-1 text-xs text-muted-foreground">{props.label}</div>
@@ -279,7 +279,7 @@ function Control(props: { label: string; onDec: () => void; onInc: () => void; d
   );
 }
 
-function Panel({ title, icon, children }: { title: string; icon?: React.ReactNode; children: React.ReactNode }) {
+function Panel({ title, icon, children }: { title: string; icon?: ReactNode; children: ReactNode }) {
   return (
     <div className="rounded-2xl border border-border bg-card p-5">
       <h2 className="mb-3 flex items-center gap-2 font-semibold">

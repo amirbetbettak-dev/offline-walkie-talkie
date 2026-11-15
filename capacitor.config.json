@@ -1,0 +1,12 @@
+{
+  "appId": "com.bisim.offline",
+  "appName": "Bisim",
+  "webDir": "dist/client",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

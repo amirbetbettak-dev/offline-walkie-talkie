@@ -13,8 +13,11 @@ import {
   createUdpTransport,
   fetchNetworkInfo,
   isNativeApp,
+  openWifiSettingsNative,
   routeToLoudspeaker,
+  scanWifiNetworksNative,
   type NetworkInfo,
+  type ScannedWifi,
   type Transport,
   type TransportStatus,
 } from "@/lib/radio/transport";
@@ -24,8 +27,18 @@ export type Peer = {
   name: string;
   freq: number;
   channel?: string;
+  groupName?: string;
+  groupCode?: string;
   ip?: string;
   seen: number;
+};
+
+export type DiscoveredGroup = {
+  code: string;
+  name: string;
+  hostName: string;
+  hostIp?: string;
+  lastSeen: number;
 };
 
 function loadSetting<T>(key: string, fallback: T): T {
@@ -40,16 +53,20 @@ function loadSetting<T>(key: string, fallback: T): T {
 export function useRadio() {
   const [id] = useState(() => Math.random().toString(36).slice(2, 10));
   const [ready, setReady] = useState(false);
-  const [power, setPower] = useState(true); // Default to active for zero-friction
+  const [power, setPower] = useState(true);
   const [name, setName] = useState("ایستگاه");
   const [channel, setChannelState] = useState("1");
+  const [groupName, setGroupName] = useState("کانال عمومی");
   const [freq, setFreq] = useState(channelFrequency(1));
   const [native, setNative] = useState(true);
   const [volume, setVolume] = useState(0.9);
   const [effect, setEffect] = useState(true);
   const [status, setStatus] = useState<TransportStatus>("offline");
   const [peers, setPeers] = useState<Peer[]>([]);
+  const [groups, setGroups] = useState<DiscoveredGroup[]>([]);
   const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
+  const [wifiList, setWifiList] = useState<ScannedWifi[]>([]);
+  const [isScanningWifi, setIsScanningWifi] = useState(false);
   const [tx, setTx] = useState(false);
   const [rx, setRx] = useState<string | null>(null);
   const [level, setLevel] = useState(0);
@@ -59,23 +76,27 @@ export function useRadio() {
   const audio = useRef<RadioAudio | null>(null);
   const transport = useRef<Transport | null>(null);
   const peersRef = useRef(new Map<string, Peer>());
-  const talkers = useRef(new Map<string, string>()); // id -> name
-  const st = useRef({ name, freq, channel, tx });
-  st.current = { name, freq, channel, tx };
+  const groupsRef = useRef(new Map<string, DiscoveredGroup>());
+  const talkers = useRef(new Map<string, string>());
+  const st = useRef({ name, freq, channel, groupName, tx });
+  st.current = { name, freq, channel, groupName, tx };
 
-  const setChannel = useCallback((newCh: string) => {
+  const setChannel = useCallback((newCh: string, newGroupName?: string) => {
     setChannelState(newCh);
+    if (newGroupName) setGroupName(newGroupName);
     const num = parseInt(newCh, 10);
     if (!isNaN(num) && num >= 1 && num <= 16) {
       setFreq(channelFrequency(num));
     }
+    transport.current?.setChannelCode(newCh);
   }, []);
 
-  // Load persisted settings after hydration
+  // Load persisted settings
   useEffect(() => {
     setName(loadSetting("name", "گوشی " + Math.floor(Math.random() * 900 + 100)));
     const savedChannel = loadSetting("channel", "1");
-    setChannel(savedChannel);
+    const savedGroupName = loadSetting("groupName", "کانال عمومی");
+    setChannel(savedChannel, savedGroupName);
     setNative(isNativeApp());
     setVolume(loadSetting("volume", 0.9));
     setEffect(loadSetting("effect", true));
@@ -84,9 +105,9 @@ export function useRadio() {
 
   useEffect(() => {
     if (!ready) return;
-    const s = { name, channel, volume, effect };
+    const s = { name, channel, groupName, volume, effect };
     for (const [k, v] of Object.entries(s)) localStorage.setItem("bisim:" + k, JSON.stringify(v));
-  }, [ready, name, channel, volume, effect]);
+  }, [ready, name, channel, groupName, volume, effect]);
 
   useEffect(() => audio.current?.setVolume(volume), [volume]);
   useEffect(() => {
@@ -96,12 +117,24 @@ export function useRadio() {
   const refreshPeers = useCallback(() => {
     const now = Date.now();
     for (const [k, p] of peersRef.current) if (now - p.seen > 8000) peersRef.current.delete(k);
+    for (const [k, g] of groupsRef.current) if (now - g.lastSeen > 12000) groupsRef.current.delete(k);
     setPeers([...peersRef.current.values()]);
+    setGroups([...groupsRef.current.values()]);
   }, []);
 
   const updateNetwork = useCallback(async () => {
     const info = await fetchNetworkInfo();
-    if (info) setNetworkInfo(info);
+    if (info) {
+      setNetworkInfo(info);
+      if (info.rxActive && info.lastRxSender) {
+        setRx(info.lastRxSender);
+      } else if (!info.rxActive && talkers.current.size === 0) {
+        setRx(null);
+      }
+      if (info.txLevel > 0) {
+        setLevel(info.txLevel / 100);
+      }
+    }
   }, []);
 
   const updateRx = () => {
@@ -132,9 +165,20 @@ export function useRadio() {
             name: msg.name,
             freq: msg.freq,
             channel: msg.channel,
+            groupName: msg.groupName,
+            groupCode: msg.groupCode || msg.channel,
             ip: fromIp || msg.ip,
             seen: Date.now(),
           });
+          if (msg.channel) {
+            groupsRef.current.set(msg.channel, {
+              code: msg.channel,
+              name: msg.groupName || `گروه ${msg.channel}`,
+              hostName: msg.name,
+              hostIp: fromIp || msg.ip,
+              lastSeen: Date.now(),
+            });
+          }
           refreshPeers();
           break;
         case "bye":
@@ -150,7 +194,7 @@ export function useRadio() {
           break;
         case "audio":
           if (!talkers.current.has(msg.id)) {
-            talkers.current.set(msg.id, peersRef.current.get(msg.id)?.name ?? "؟");
+            talkers.current.set(msg.id, peersRef.current.get(msg.id)?.name ?? "طرف مقابل");
             updateRx();
           }
           a?.playFrame(msg.id, decodePcm(msg.data));
@@ -174,6 +218,8 @@ export function useRadio() {
       name: st.current.name,
       freq: st.current.freq,
       channel: st.current.channel,
+      groupName: st.current.groupName,
+      groupCode: st.current.channel,
     });
   }, [id, send]);
 
@@ -186,12 +232,13 @@ export function useRadio() {
     const beat = setInterval(() => {
       hello();
       refreshPeers();
-    }, 2000);
+      updateNetwork();
+    }, 1500);
 
     const first = setTimeout(() => {
       hello();
       updateNetwork();
-    }, 400);
+    }, 300);
 
     return () => {
       clearInterval(beat);
@@ -200,13 +247,14 @@ export function useRadio() {
       transport.current?.close();
       transport.current = null;
       peersRef.current.clear();
+      groupsRef.current.clear();
       talkers.current.clear();
       setRx(null);
       setPeers([]);
+      setGroups([]);
     };
   }, [power, handle, hello, refreshPeers, send, id, updateNetwork]);
 
-  // Announce new name / frequency / channel right away
   useEffect(() => {
     if (power) {
       hello();
@@ -216,7 +264,7 @@ export function useRadio() {
     talkers.current.clear();
     setRx(null);
     audio.current?.rxStatic(false);
-  }, [power, name, freq, channel, hello, updateNetwork]);
+  }, [power, name, freq, channel, groupName, hello, updateNetwork]);
 
   useEffect(() => {
     const close = () => send({ t: "bye", id, freq: st.current.freq, channel: st.current.channel });
@@ -230,7 +278,9 @@ export function useRadio() {
       audio.current.setVolume(volume);
       audio.current.effect = effect;
     }
-    await audio.current.initMic();
+    try {
+      await audio.current.initMic();
+    } catch {}
     routeToLoudspeaker();
   }, [volume, effect]);
 
@@ -247,19 +297,62 @@ export function useRadio() {
       audio.current?.roger();
       updateNetwork();
     } catch {
-      setError("اجازه دسترسی به میکروفون را در تنظیمات فعال کنید.");
+      setError("اجازه دسترسی به میکروفون را فعال کنید.");
     }
   }, [power, ensureAudio, updateNetwork]);
 
   const scanNetwork = useCallback(async () => {
-    setNotice("در حال جستجوی گوشی‌های متصل به هات‌اسپات…");
+    setNotice("در حال اسکن تمام آی‌پی‌های هات‌اسپات (Subnet Sweep)…");
     try {
-      const helloJson = JSON.stringify({ t: "hello", id, name: st.current.name, freq: st.current.freq, channel: st.current.channel }); await transport.current?.scan(helloJson);
+      const helloJson = JSON.stringify({
+        t: "hello",
+        id,
+        name: st.current.name,
+        freq: st.current.freq,
+        channel: st.current.channel,
+        groupName: st.current.groupName,
+      });
+      await transport.current?.scan(helloJson);
       hello();
       await updateNetwork();
     } catch {}
     setTimeout(() => setNotice(null), 2500);
-  }, [hello, updateNetwork]);
+  }, [hello, updateNetwork, id]);
+
+  const scanWifi = useCallback(async () => {
+    setIsScanningWifi(true);
+    setNotice("در حال جستجوی وای‌فای‌ها و هات‌اسپات‌های اطراف…");
+    try {
+      const list = await scanWifiNetworksNative();
+      setWifiList(list);
+    } catch {}
+    setIsScanningWifi(false);
+    setTimeout(() => setNotice(null), 2000);
+  }, []);
+
+  const openWifiSettings = useCallback(async () => {
+    await openWifiSettingsNative();
+  }, []);
+
+  const createGroup = useCallback((customName?: string) => {
+    const code = Math.floor(1000 + Math.random() * 9000).toString();
+    const gName = customName?.trim() || `گروه ${code}`;
+    setChannel(code, gName);
+    setNotice(`گروه ساخته شد! کد اشتراک: ${code}`);
+    setTimeout(() => setNotice(null), 3500);
+    hello();
+    return code;
+  }, [setChannel, hello]);
+
+  const joinGroup = useCallback((code: string, gName?: string) => {
+    if (!code) return;
+    const cleanCode = code.trim();
+    setChannel(cleanCode, gName || `گروه ${cleanCode}`);
+    setNotice(`وارد گروه ${cleanCode} شدید`);
+    setTimeout(() => setNotice(null), 3000);
+    hello();
+    scanNetwork();
+  }, [setChannel, hello, scanNetwork]);
 
   const addPeerManual = useCallback(
     async (ip: string) => {
@@ -267,6 +360,8 @@ export function useRadio() {
       await transport.current?.addPeerIp(ip);
       hello();
       await updateNetwork();
+      setNotice(`آی‌پی ${ip} اضافه شد`);
+      setTimeout(() => setNotice(null), 2500);
     },
     [hello, updateNetwork],
   );
@@ -276,18 +371,11 @@ export function useRadio() {
       await togglePower();
       return;
     }
-    if (!audio.current) {
-      try {
-        await ensureAudio();
-      } catch {
-        setError("دسترسی به میکروفون داده نشد.");
-        return;
-      }
-    }
+    await ensureAudio();
     const a = audio.current;
-    if (!a || st.current.tx) return;
+    if (st.current.tx) return;
     if (talkers.current.size > 0) {
-      a.busy();
+      a?.busy();
       navigator.vibrate?.([60, 60, 60]);
       setNotice("کانال مشغول است");
       setTimeout(() => setNotice(null), 1500);
@@ -295,7 +383,12 @@ export function useRadio() {
     }
     setTx(true);
     navigator.vibrate?.(30);
-    a.chirp();
+    a?.chirp();
+
+    // 1. Send native UDP audio directly from AudioRecord
+    transport.current?.startNativeTx();
+
+    // 2. Also send signaling start
     send({
       t: "start",
       id,
@@ -303,7 +396,9 @@ export function useRadio() {
       freq: st.current.freq,
       channel: st.current.channel,
     });
-    a.startCapture(
+
+    // 3. Web Audio fallback capture
+    a?.startCapture(
       (pcm) =>
         send({
           t: "audio",
@@ -318,12 +413,13 @@ export function useRadio() {
 
   const pttUp = useCallback(() => {
     const a = audio.current;
-    if (!st.current.tx || !a) return;
-    a.stopCapture();
+    if (!st.current.tx) return;
+    transport.current?.stopNativeTx();
+    a?.stopCapture();
     setTx(false);
     setLevel(0);
     send({ t: "end", id, freq: st.current.freq, channel: st.current.channel });
-    a.roger();
+    a?.roger();
     navigator.vibrate?.(20);
   }, [id, send]);
 
@@ -335,6 +431,8 @@ export function useRadio() {
     setName,
     channel,
     setChannel,
+    groupName,
+    setGroupName,
     freq,
     setFreq,
     volume,
@@ -343,7 +441,10 @@ export function useRadio() {
     setEffect,
     status,
     peers,
+    groups,
     networkInfo,
+    wifiList,
+    isScanningWifi,
     tx,
     rx,
     level,
@@ -351,9 +452,12 @@ export function useRadio() {
     notice,
     togglePower,
     scanNetwork,
+    scanWifi,
+    openWifiSettings,
+    createGroup,
+    joinGroup,
     addPeerManual,
     pttDown,
     pttUp,
-    analyser: () => audio.current?.analyser ?? null,
   };
 }

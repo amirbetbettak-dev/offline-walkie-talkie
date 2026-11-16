@@ -24,16 +24,16 @@ export function tune(freq: number, steps: number): number {
 }
 
 export type RadioMessage =
-  | { t: "hello"; id: string; name: string; freq: number; channel?: string; ip?: string }
+  | { t: "hello"; id: string; name: string; freq: number; channel?: string; groupName?: string; groupCode?: string; ip?: string }
   | { t: "bye"; id: string; freq: number; channel?: string }
   | { t: "start"; id: string; name: string; freq: number; channel?: string }
   | { t: "audio"; id: string; freq: number; channel?: string; data: string }
   | { t: "end"; id: string; freq: number; channel?: string }
   | { t: "ping" };
 
-const normalizeChannel = (ch: string) => ch.trim().toLowerCase().replace(/[\s\-_]/g, "");
+export const normalizeChannel = (ch: string) => ch.trim().toLowerCase().replace(/[\s\-_]/g, "");
 
-/** Presence (hello/bye) is network-wide; voice only reaches stations tuned to the same channel/frequency. */
+/** Presence (hello/bye) is network-wide; voice only reaches stations tuned to the same channel/frequency/group. */
 export function shouldAccept(msg: RadioMessage, myId: string, myFreq: number, myChannel?: string): boolean {
   if (msg.t === "ping") return false;
   if (msg.id === myId) return false;

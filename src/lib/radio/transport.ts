@@ -4,11 +4,41 @@ import { createDeduper, type Packet, type RadioMessage } from "./protocol";
 
 export type TransportStatus = "connecting" | "online" | "offline" | "unsupported";
 
+export interface DiscoveredPeer {
+  ip: string;
+  name: string;
+  channel: string;
+  lastSeenSec: number;
+}
+
 export interface NetworkInfo {
   ip: string;
   isHotspot: boolean;
-  knownPeers: string[];
-  broadcasts: string[];
+  port: number;
+  socketBound: boolean;
+  ssid: string;
+  knownPeers: DiscoveredPeer[];
+  peerCount: number;
+  txActive: boolean;
+  txPackets: number;
+  txBytes: number;
+  txLevel: number;
+  rxActive: boolean;
+  rxPackets: number;
+  rxBytes: number;
+  rxLevel: number;
+  lastRxSender: string;
+  lastRxAgeSec: number;
+  hasAudioPermission: boolean;
+  hasLocationPermission: boolean;
+}
+
+export interface ScannedWifi {
+  ssid: string;
+  bssid: string;
+  level: number;
+  frequency: number;
+  capabilities: string;
 }
 
 export interface Transport {
@@ -17,6 +47,11 @@ export interface Transport {
   scan(data?: string): Promise<void>;
   getNetwork(): Promise<NetworkInfo | null>;
   addPeerIp(ip: string): Promise<void>;
+  startNativeTx(): Promise<void>;
+  stopNativeTx(): Promise<void>;
+  scanWifi(): Promise<ScannedWifi[]>;
+  openWifiSettings(): Promise<void>;
+  setChannelCode(code: string): Promise<void>;
 }
 
 type Handlers = {
@@ -32,6 +67,11 @@ interface BisimUdpPlugin {
   getNetworkInfo(): Promise<NetworkInfo>;
   scanSubnet(opts?: { data?: string }): Promise<void>;
   addPeer(opts: { ip: string }): Promise<void>;
+  startNativeTx(): Promise<void>;
+  stopNativeTx(): Promise<void>;
+  scanWifiNetworks(): Promise<{ networks: ScannedWifi[] }>;
+  openWifiSettings(): Promise<void>;
+  setChannelCode(opts: { channel: string }): Promise<void>;
   addListener(
     event: "message",
     cb: (e: { data: string; from: string }) => void,
@@ -60,6 +100,23 @@ export async function fetchNetworkInfo(): Promise<NetworkInfo | null> {
   }
 }
 
+export async function scanWifiNetworksNative(): Promise<ScannedWifi[]> {
+  if (!isNativeApp()) return [];
+  try {
+    const res = await BisimUdp.scanWifiNetworks();
+    return res.networks || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function openWifiSettingsNative(): Promise<void> {
+  if (!isNativeApp()) return;
+  try {
+    await BisimUdp.openWifiSettings();
+  } catch {}
+}
+
 /** Wi-Fi / hotspot transport: UDP broadcast + unicast from the native Android plugin. No server, no internet. */
 export function createUdpTransport({ onMessage, onStatus }: Handlers): Transport {
   if (!isNativeApp()) {
@@ -70,6 +127,11 @@ export function createUdpTransport({ onMessage, onStatus }: Handlers): Transport
       scan: async () => {},
       getNetwork: async () => null,
       addPeerIp: async () => {},
+      startNativeTx: async () => {},
+      stopNativeTx: async () => {},
+      scanWifi: async () => [],
+      openWifiSettings: async () => {},
+      setChannelCode: async () => {},
     };
   }
   let seq = 1;
@@ -91,7 +153,6 @@ export function createUdpTransport({ onMessage, onStatus }: Handlers): Transport
   });
 
   BisimUdp.addListener("peerDiscovered", ({ peerIp }) => {
-    // A new peer announced itself on the subnet
     BisimUdp.addPeer({ ip: peerIp }).catch(() => {});
   }).then((h) => {
     if (open) handles.push(h);
@@ -132,6 +193,34 @@ export function createUdpTransport({ onMessage, onStatus }: Handlers): Transport
     addPeerIp: async (ip: string) => {
       try {
         await BisimUdp.addPeer({ ip });
+      } catch {}
+    },
+    startNativeTx: async () => {
+      try {
+        await BisimUdp.startNativeTx();
+      } catch {}
+    },
+    stopNativeTx: async () => {
+      try {
+        await BisimUdp.stopNativeTx();
+      } catch {}
+    },
+    scanWifi: async () => {
+      try {
+        const res = await BisimUdp.scanWifiNetworks();
+        return res.networks || [];
+      } catch {
+        return [];
+      }
+    },
+    openWifiSettings: async () => {
+      try {
+        await BisimUdp.openWifiSettings();
+      } catch {}
+    },
+    setChannelCode: async (channel: string) => {
+      try {
+        await BisimUdp.setChannelCode({ channel });
       } catch {}
     },
   };

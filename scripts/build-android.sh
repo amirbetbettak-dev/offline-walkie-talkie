@@ -13,7 +13,8 @@ cp native/android/BisimUdpPlugin.java "$JAVA/com/bisim/udp/"
 cp native/android/MainActivity.java "$JAVA/com/bisim/offline/"
 
 MANIFEST=android/app/src/main/AndroidManifest.xml
-for p in RECORD_AUDIO MODIFY_AUDIO_SETTINGS INTERNET ACCESS_NETWORK_STATE ACCESS_WIFI_STATE CHANGE_WIFI_MULTICAST_STATE VIBRATE WAKE_LOCK; do
+PERMS="RECORD_AUDIO MODIFY_AUDIO_SETTINGS INTERNET ACCESS_NETWORK_STATE ACCESS_WIFI_STATE CHANGE_WIFI_STATE CHANGE_WIFI_MULTICAST_STATE ACCESS_FINE_LOCATION ACCESS_COARSE_LOCATION NEARBY_WIFI_DEVICES VIBRATE WAKE_LOCK"
+for p in $PERMS; do
   grep -q "android.permission.$p\"" "$MANIFEST" || \
     sed -i "s#<application#<uses-permission android:name=\"android.permission.$p\" />\n    <application#" "$MANIFEST"
 done

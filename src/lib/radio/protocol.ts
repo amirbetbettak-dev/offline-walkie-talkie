@@ -1,4 +1,4 @@
-// Wire protocol shared by every transport (BroadcastChannel, LAN relay, future native UDP).
+// Wire protocol shared by every transport (BroadcastChannel, LAN relay, native UDP).
 export const BASE_FREQ = 446.00625; // PMR446 channel 1 (MHz)
 export const FREQ_STEP = 0.0125; // 12.5 kHz
 export const CHANNEL_COUNT = 16;
@@ -24,16 +24,24 @@ export function tune(freq: number, steps: number): number {
 }
 
 export type RadioMessage =
-  | { t: "hello"; id: string; name: string; freq: number }
-  | { t: "bye"; id: string; freq: number }
-  | { t: "start"; id: string; name: string; freq: number }
-  | { t: "audio"; id: string; freq: number; data: string }
-  | { t: "end"; id: string; freq: number };
+  | { t: "hello"; id: string; name: string; freq: number; channel?: string; ip?: string }
+  | { t: "bye"; id: string; freq: number; channel?: string }
+  | { t: "start"; id: string; name: string; freq: number; channel?: string }
+  | { t: "audio"; id: string; freq: number; channel?: string; data: string }
+  | { t: "end"; id: string; freq: number; channel?: string }
+  | { t: "ping" };
 
-/** Presence (hello/bye) is network-wide; voice only reaches stations tuned to the same frequency. */
-export function shouldAccept(msg: RadioMessage, myId: string, myFreq: number): boolean {
+const normalizeChannel = (ch: string) => ch.trim().toLowerCase().replace(/[\s\-_]/g, "");
+
+/** Presence (hello/bye) is network-wide; voice only reaches stations tuned to the same channel/frequency. */
+export function shouldAccept(msg: RadioMessage, myId: string, myFreq: number, myChannel?: string): boolean {
+  if (msg.t === "ping") return false;
   if (msg.id === myId) return false;
   if (msg.t === "hello" || msg.t === "bye") return true;
+
+  if (myChannel && msg.channel) {
+    return normalizeChannel(msg.channel) === normalizeChannel(myChannel);
+  }
   return Math.abs(msg.freq - myFreq) < 1e-6;
 }
 
@@ -54,7 +62,7 @@ export function decodePcm(b64: string): Int16Array {
 }
 
 /** Every packet carries a per-sender sequence number `s`. */
-export type Packet = RadioMessage & { s: number };
+export type Packet = (RadioMessage & { s?: number }) | { t: "ping"; s?: number };
 
 /**
  * A phone can hear the same broadcast on more than one network path; drop repeats
@@ -63,6 +71,8 @@ export type Packet = RadioMessage & { s: number };
 export function createDeduper() {
   const last = new Map<string, number>();
   return (p: Packet): boolean => {
+    if (p.t === "ping" || !("id" in p)) return true;
+    if (p.s == null) return true;
     const prev = last.get(p.id);
     if (prev !== undefined && p.s <= prev && prev - p.s < 10000) return false;
     last.set(p.id, p.s);

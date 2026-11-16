@@ -47,3 +47,14 @@ it("a packet heard twice plays only once", async () => {
   expect(fresh(p)).toBe(false);
   expect(fresh({ ...p, s: 6 })).toBe(true);
 });
+
+describe("named channels in shouldAccept", () => {
+  it("matches channel names case-insensitively", () => {
+    expect(shouldAccept({ t: "audio", id: "peer1", freq: 446.00625, channel: "Wi-Fi", data: "" }, "me", 446.00625, "wifi")).toBe(true);
+    expect(shouldAccept({ t: "audio", id: "peer1", freq: 446.00625, channel: "groupA", data: "" }, "me", 446.00625, "groupB")).toBe(false);
+  });
+
+  it("ignores ping packets in listener acceptance", () => {
+    expect(shouldAccept({ t: "ping" }, "me", 446.00625)).toBe(false);
+  });
+});

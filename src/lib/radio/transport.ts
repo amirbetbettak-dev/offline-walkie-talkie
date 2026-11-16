@@ -4,24 +4,41 @@ import { createDeduper, type Packet, type RadioMessage } from "./protocol";
 
 export type TransportStatus = "connecting" | "online" | "offline" | "unsupported";
 
+export interface NetworkInfo {
+  ip: string;
+  isHotspot: boolean;
+  knownPeers: string[];
+  broadcasts: string[];
+}
+
 export interface Transport {
-  send(msg: RadioMessage): void;
+  send(msg: RadioMessage, targetIp?: string): void;
   close(): void;
+  scan(data?: string): Promise<void>;
+  getNetwork(): Promise<NetworkInfo | null>;
+  addPeerIp(ip: string): Promise<void>;
 }
 
 type Handlers = {
-  onMessage: (msg: RadioMessage) => void;
+  onMessage: (msg: RadioMessage, fromIp?: string) => void;
   onStatus: (s: TransportStatus) => void;
 };
 
 interface BisimUdpPlugin {
-  start(opts: { port: number }): Promise<{ broadcast: string[] }>;
-  send(opts: { data: string }): Promise<void>;
+  start(opts: { port: number }): Promise<{ status: string; port: number }>;
+  send(opts: { data: string; targetIp?: string }): Promise<void>;
   stop(): Promise<void>;
   useSpeaker(): Promise<void>;
+  getNetworkInfo(): Promise<NetworkInfo>;
+  scanSubnet(opts?: { data?: string }): Promise<void>;
+  addPeer(opts: { ip: string }): Promise<void>;
   addListener(
     event: "message",
     cb: (e: { data: string; from: string }) => void,
+  ): Promise<PluginListenerHandle>;
+  addListener(
+    event: "peerDiscovered",
+    cb: (e: { peerIp: string }) => void,
   ): Promise<PluginListenerHandle>;
 }
 
@@ -34,44 +51,88 @@ export function routeToLoudspeaker() {
   if (isNativeApp()) BisimUdp.useSpeaker().catch(() => {});
 }
 
-/** Wi-Fi / hotspot transport: UDP broadcast from the native Android plugin. No server, no internet. */
+export async function fetchNetworkInfo(): Promise<NetworkInfo | null> {
+  if (!isNativeApp()) return null;
+  try {
+    return await BisimUdp.getNetworkInfo();
+  } catch {
+    return null;
+  }
+}
+
+/** Wi-Fi / hotspot transport: UDP broadcast + unicast from the native Android plugin. No server, no internet. */
 export function createUdpTransport({ onMessage, onStatus }: Handlers): Transport {
   if (!isNativeApp()) {
     onStatus("unsupported");
-    return { send: () => {}, close: () => {} };
+    return {
+      send: () => {},
+      close: () => {},
+      scan: async () => {},
+      getNetwork: async () => null,
+      addPeerIp: async () => {},
+    };
   }
   let seq = 1;
   let open = true;
-  let listener: PluginListenerHandle | undefined;
+  const handles: PluginListenerHandle[] = [];
   const fresh = createDeduper();
   onStatus("connecting");
 
-  BisimUdp.addListener("message", ({ data }) => {
+  BisimUdp.addListener("message", ({ data, from }) => {
     try {
       const p = JSON.parse(data) as Packet;
-      if (fresh(p)) onMessage(p);
+      if (fresh(p)) onMessage(p as RadioMessage, from);
     } catch {
       /* ignore foreign packets */
     }
   }).then((h) => {
-    if (open) listener = h;
+    if (open) handles.push(h);
+    else h.remove();
+  });
+
+  BisimUdp.addListener("peerDiscovered", ({ peerIp }) => {
+    // A new peer announced itself on the subnet
+    BisimUdp.addPeer({ ip: peerIp }).catch(() => {});
+  }).then((h) => {
+    if (open) handles.push(h);
     else h.remove();
   });
 
   BisimUdp.start({ port: UDP_PORT })
-    .then(() => open && onStatus("online"))
+    .then(() => {
+      if (open) {
+        onStatus("online");
+        BisimUdp.scanSubnet().catch(() => {});
+      }
+    })
     .catch(() => open && onStatus("offline"));
 
   return {
-    send: (m) => {
+    send: (m, targetIp) => {
       if (!open) return;
-      BisimUdp.send({ data: JSON.stringify({ ...m, s: seq++ }) }).catch(() => {});
+      BisimUdp.send({ data: JSON.stringify({ ...m, s: seq++ }), targetIp }).catch(() => {});
     },
     close: () => {
       open = false;
-      listener?.remove();
+      for (const h of handles) h.remove();
+      handles.length = 0;
       BisimUdp.stop().catch(() => {});
       onStatus("offline");
+    },
+    scan: async (data?: string) => {
+      if (open) await BisimUdp.scanSubnet({ data }).catch(() => {});
+    },
+    getNetwork: async () => {
+      try {
+        return await BisimUdp.getNetworkInfo();
+      } catch {
+        return null;
+      }
+    },
+    addPeerIp: async (ip: string) => {
+      try {
+        await BisimUdp.addPeer({ ip });
+      } catch {}
     },
   };
 }

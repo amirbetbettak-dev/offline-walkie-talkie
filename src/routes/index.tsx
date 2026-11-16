@@ -1,6 +1,20 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { ChevronLeft, ChevronRight, Mic, Minus, Plus, Power, Settings2, Smartphone, Users } from "lucide-react";
-import { useEffect, useRef, type ReactNode } from "react";
+import {
+  ChevronLeft,
+  ChevronRight,
+  Hash,
+  LayoutGrid,
+  Mic,
+  MapPin,
+  Power,
+  RefreshCw,
+  Search,
+  Settings2,
+  Smartphone,
+  Users,
+  Wifi,
+} from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 
 import { SignalMeter } from "@/components/SignalMeter";
 import { Button } from "@/components/ui/button";
@@ -10,11 +24,11 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetTrigger } from "@/co
 import { Slider } from "@/components/ui/slider";
 import { Switch } from "@/components/ui/switch";
 import { useRadio } from "@/hooks/use-radio";
-import { CHANNEL_COUNT, channelFrequency, frequencyChannel, tune } from "@/lib/radio/protocol";
+import { CHANNEL_COUNT, channelFrequency, frequencyChannel } from "@/lib/radio/protocol";
 import { cn } from "@/lib/utils";
 
-const TITLE = "بیسیم — ارتباط صوتی بدون اینترنت";
-const DESC = "بیسیم Push-to-Talk بین گوشی‌ها روی وای‌فای یا هات‌اسپات محلی، با کانال، فرکانس و افکت رادیویی.";
+const TITLE = "بیسیم — Two Way Walkie Talkie";
+const DESC = "بیسیم PTT آفلاین برای ارتباط صوتی از طریق وای‌فای و هات‌اسپات محلی بدون اینترنت.";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -23,36 +37,38 @@ export const Route = createFileRoute("/")({
       { name: "description", content: DESC },
       { property: "og:title", content: TITLE },
       { property: "og:description", content: DESC },
-      { property: "og:type", content: "website" },
-      { name: "twitter:card", content: "summary" },
     ],
   }),
   component: Index,
 });
 
 const STATUS_TEXT = {
-  online: "متصل به شبکه محلی",
-  connecting: "در حال اتصال…",
+  online: "متصل به وای‌فای / هات‌اسپات",
+  connecting: "در حال اتصال به شبکه…",
   offline: "خاموش",
-  unsupported: "فقط در برنامه گوشی",
+  unsupported: "در برنامه اندروید باز شود",
 } as const;
 
 function Index() {
   const r = useRadio();
-  const channel = frequencyChannel(r.freq);
-  const sameChannel = r.peers.filter((p) => Math.abs(p.freq - r.freq) < 1e-6);
-  const chipRow = useRef<HTMLDivElement>(null);
+  const [channelSheetOpen, setChannelSheetOpen] = useState(false);
+  const [manualIp, setManualIp] = useState("");
+
+  const numChannel = parseInt(r.channel, 10);
+  const isNumeric = !isNaN(numChannel) && numChannel >= 1 && numChannel <= CHANNEL_COUNT;
+
+  const sameChannelPeers = r.peers.filter((p) => {
+    if (p.channel) return p.channel.trim().toLowerCase() === r.channel.trim().toLowerCase();
+    return Math.abs(p.freq - r.freq) < 1e-6;
+  });
 
   const stepChannel = (d: number) => {
-    const next = (((channel ?? 1) - 1 + d + CHANNEL_COUNT) % CHANNEL_COUNT) + 1;
-    r.setFreq(channelFrequency(next));
+    const cur = isNumeric ? numChannel : 1;
+    const next = (((cur - 1 + d + CHANNEL_COUNT) % CHANNEL_COUNT) + 1).toString();
+    r.setChannel(next);
   };
 
-  useEffect(() => {
-    chipRow.current?.querySelector('[data-active="true"]')?.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
-  }, [channel]);
-
-  // Hold Space to talk (keyboards / desktop)
+  // Spacebar support for desktop testing
   const { pttDown, pttUp } = r;
   useEffect(() => {
     const typing = (e: KeyboardEvent) => (e.target as HTMLElement)?.tagName === "INPUT";
@@ -71,102 +87,97 @@ function Index() {
     };
   }, [pttDown, pttUp]);
 
-  const statusTone = r.status === "online" ? "bg-primary" : r.status === "connecting" ? "bg-rx" : "bg-muted-foreground";
+  const statusTone =
+    r.status === "online" ? "bg-emerald-500 shadow-emerald-500/50" : r.status === "connecting" ? "bg-amber-500" : "bg-muted-foreground";
 
   return (
-    <main className="bg-glow min-h-screen select-none">
-      <div className="mx-auto flex min-h-screen max-w-md flex-col gap-5 px-5 pt-6 pb-8">
-        {/* Top bar */}
-        <header className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="grid size-10 place-items-center rounded-2xl bg-primary/15 text-primary">
-              <Mic className="size-5" />
-            </div>
-            <div>
-              <h1 className="text-lg leading-tight font-extrabold">بیسیم</h1>
-              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <span className={cn("size-1.5 rounded-full", r.power ? statusTone : "bg-muted-foreground")} />
-                {r.power ? STATUS_TEXT[r.status] : STATUS_TEXT.offline}
-              </p>
-            </div>
-          </div>
+    <main className="bg-glow min-h-screen select-none bg-background text-foreground">
+      <div className="mx-auto flex min-h-screen max-w-md flex-col justify-between gap-4 px-5 pt-6 pb-6">
+        {/* Top Header - Two Way style */}
+        <header className="flex items-center justify-between gap-2 border-b border-border/50 pb-4">
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setChannelSheetOpen(true)}
+              className="flex items-center gap-2 rounded-2xl border-primary/30 bg-primary/10 px-3 py-2 text-primary hover:bg-primary/20"
+            >
+              <LayoutGrid className="size-4" />
+              <span className="font-bold text-sm tracking-wide">
+                {r.channel === "wifi" ? "کانال عمومی وای‌فای" : isNumeric ? `کانال ${r.channel}` : r.channel}
+              </span>
+            </Button>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {/* Quick scan button */}
+            <Button
+              size="icon"
+              variant="ghost"
+              onClick={r.scanNetwork}
+              title="اسکن گوشی‌های هات‌اسپات"
+              className="size-9 rounded-full text-muted-foreground hover:text-foreground"
+            >
+              <RefreshCw className="size-4" />
+            </Button>
+
             <SettingsSheet r={r} />
+
             <Button
               size="icon"
               variant={r.power ? "default" : "secondary"}
               onClick={r.togglePower}
               aria-label={r.power ? "خاموش کردن" : "روشن کردن"}
-              className="size-10 rounded-full"
+              className={cn("size-9 rounded-full", r.power && "bg-emerald-600 hover:bg-emerald-500")}
             >
-              <Power />
+              <Power className="size-4" />
             </Button>
           </div>
         </header>
 
+        {/* Network & IP status pill */}
+        <div className="flex items-center justify-between rounded-2xl bg-card/60 px-4 py-2 border border-border text-xs text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <span className={cn("size-2 rounded-full shadow-sm", r.power ? statusTone : "bg-muted-foreground")} />
+            <span>{r.power ? STATUS_TEXT[r.status] : "بیسیم خاموش است"}</span>
+          </div>
+          {r.networkInfo?.ip && (
+            <span className="font-mono text-foreground font-semibold" dir="ltr">
+              IP: {r.networkInfo.ip} {r.networkInfo.isHotspot && "(هات‌اسپات)"}
+            </span>
+          )}
+        </div>
+
         {!r.native && (
-          <div className="flex items-start gap-3 rounded-2xl border border-border bg-card p-4 text-sm text-muted-foreground">
-            <Smartphone className="mt-0.5 size-4 shrink-0 text-primary" />
-            <p>ارتباط صوتی بین گوشی‌ها در برنامه نصب‌شده اندروید کار می‌کند؛ گوشی‌ها فقط باید به یک وای‌فای یا هات‌اسپات وصل باشند.</p>
+          <div className="flex items-center gap-2 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-500">
+            <Smartphone className="size-4 shrink-0" />
+            <p>در فایل نصبی اندروید، ارتباط از طریق هات‌اسپات و وای‌فای آفلاین کار می‌کند.</p>
           </div>
         )}
 
-        {/* Channel */}
-        <section className="rounded-3xl border border-border bg-card p-5">
-          <div className="flex items-center justify-between">
-            <Button variant="secondary" size="icon" className="size-11 rounded-full" onClick={() => stepChannel(1)} aria-label="کانال بعدی">
-              <ChevronRight />
-            </Button>
-            <div className="text-center">
-              <p className="text-xs text-muted-foreground">کانال</p>
-              <p className="font-display text-6xl leading-none font-bold tabular-nums" dir="ltr">
-                {channel ? String(channel).padStart(2, "0") : "--"}
-              </p>
-            </div>
-            <Button variant="secondary" size="icon" className="size-11 rounded-full" onClick={() => stepChannel(-1)} aria-label="کانال قبلی">
-              <ChevronLeft />
-            </Button>
-          </div>
-
-          <div className="mt-4 flex items-center justify-center gap-3" dir="ltr">
-            <Button variant="ghost" size="icon" className="size-8 rounded-full" onClick={() => r.setFreq(tune(r.freq, -1))} aria-label="کاهش فرکانس">
-              <Minus className="size-4" />
-            </Button>
-            <span className="font-display text-sm tracking-wide text-muted-foreground tabular-nums">{r.freq.toFixed(5)} MHz</span>
-            <Button variant="ghost" size="icon" className="size-8 rounded-full" onClick={() => r.setFreq(tune(r.freq, 1))} aria-label="افزایش فرکانس">
-              <Plus className="size-4" />
-            </Button>
-          </div>
-
-          <div ref={chipRow} className="-mx-5 mt-4 flex gap-2 overflow-x-auto px-5 pb-1 [scrollbar-width:none]" dir="ltr">
-            {Array.from({ length: CHANNEL_COUNT }, (_, i) => i + 1).map((ch) => (
-              <button
-                key={ch}
-                data-active={channel === ch}
-                onClick={() => r.setFreq(channelFrequency(ch))}
-                className={cn(
-                  "font-display h-9 min-w-9 shrink-0 rounded-full px-3 text-sm tabular-nums transition-colors",
-                  channel === ch ? "bg-primary text-primary-foreground" : "bg-secondary text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {ch}
-              </button>
-            ))}
-          </div>
-        </section>
-
-        {/* PTT */}
-        <section className="flex flex-1 flex-col items-center justify-center gap-5 py-2">
+        {/* Main PTT Button Section - Two Way Clean Style */}
+        <section className="flex flex-1 flex-col items-center justify-center gap-6 py-4">
           <div className="relative grid place-items-center">
+            {/* Pulse rings when transmitting (green) or receiving (blue/cyan) */}
             {(r.tx || r.rx) && (
               <>
-                <span className={cn("ptt-ring absolute inset-0 rounded-full", r.tx ? "bg-tx" : "bg-rx")} />
-                <span className={cn("ptt-ring absolute inset-0 rounded-full [animation-delay:0.8s]", r.tx ? "bg-tx" : "bg-rx")} />
+                <span
+                  className={cn(
+                    "ptt-ring absolute inset-0 rounded-full animate-ping duration-1000",
+                    r.tx ? "bg-emerald-500/30" : "bg-cyan-500/30",
+                  )}
+                />
+                <span
+                  className={cn(
+                    "ptt-ring absolute inset-0 rounded-full animate-pulse",
+                    r.tx ? "bg-emerald-500/20" : "bg-cyan-500/20",
+                  )}
+                />
               </>
             )}
+
             <button
               type="button"
-              disabled={!r.power}
               aria-label="PTT — نگه دارید و صحبت کنید"
               onPointerDown={(e) => {
                 e.currentTarget.setPointerCapture(e.pointerId);
@@ -177,54 +188,211 @@ function Index() {
               onLostPointerCapture={r.pttUp}
               onContextMenu={(e) => e.preventDefault()}
               className={cn(
-                "relative grid size-56 touch-none place-items-center rounded-full border border-border bg-card shadow-2xl transition-all duration-150 disabled:opacity-40",
-                r.tx && "scale-95 border-transparent bg-tx text-destructive-foreground",
-                !r.tx && r.rx && "border-rx",
-                !r.tx && !r.rx && r.power && "active:scale-95",
+                "relative grid size-64 touch-none select-none place-items-center rounded-full border-4 transition-all duration-150 shadow-2xl active:scale-95",
+                r.tx
+                  ? "border-emerald-500 bg-emerald-500/20 shadow-emerald-500/40"
+                  : r.rx
+                    ? "border-cyan-400 bg-cyan-500/20 shadow-cyan-500/40"
+                    : "border-primary/40 bg-card hover:border-primary/70",
               )}
             >
-              <span className="flex flex-col items-center gap-2">
-                <Mic className={cn("size-14", !r.tx && (r.rx ? "text-rx" : "text-primary"))} />
-                <span className="font-display text-xl font-bold tracking-widest">PTT</span>
-              </span>
+              <div className="flex flex-col items-center gap-3">
+                <div
+                  className={cn(
+                    "grid size-24 place-items-center rounded-full transition-colors",
+                    r.tx
+                      ? "bg-emerald-500 text-white"
+                      : r.rx
+                        ? "bg-cyan-500 text-white"
+                        : "bg-primary/10 text-primary",
+                  )}
+                >
+                  <Mic className="size-12" />
+                </div>
+                <span className="font-display text-2xl font-black tracking-widest text-foreground">
+                  {r.tx ? "در حال صحبت" : r.rx ? "دریافت صدا" : "PTT"}
+                </span>
+                <span className="text-xs text-muted-foreground">
+                  {r.tx ? "برای پایان رها کنید" : "نگه دارید و صحبت کنید"}
+                </span>
+              </div>
             </button>
           </div>
 
-          <div className="flex h-12 flex-col items-center gap-2 text-center">
-            <p className={cn("text-sm font-semibold", r.tx ? "text-tx" : r.rx ? "text-rx" : "text-muted-foreground")}>
+          <div className="flex h-10 flex-col items-center gap-1.5 text-center">
+            <p className={cn("text-sm font-semibold", r.tx ? "text-emerald-400" : r.rx ? "text-cyan-400" : "text-muted-foreground")}>
               {r.error ??
                 r.notice ??
-                (!r.power ? "برای شروع، بیسیم را روشن کنید" : r.tx ? "در حال صحبت…" : r.rx ? `${r.rx} صحبت می‌کند` : "نگه دارید و صحبت کنید")}
+                (r.tx ? "صدای شما برای همه ارسال می‌شود…" : r.rx ? `${r.rx} در حال صحبت است` : "آماده برای مکالمه")}
             </p>
-            <span className={cn(r.tx ? "text-tx" : "text-rx", !(r.tx || r.rx) && "opacity-0")}>
+            <span className={cn(r.tx ? "text-emerald-400" : "text-cyan-400", !(r.tx || r.rx) && "opacity-0")}>
               <SignalMeter txLevel={r.level} tx={r.tx} getAnalyser={r.analyser} />
             </span>
           </div>
         </section>
 
-        {/* Stations */}
-        <section className="rounded-3xl border border-border bg-card p-5">
-          <h2 className="mb-3 flex items-center gap-2 text-sm font-semibold">
-            <Users className="size-4 text-primary" />
-            ایستگاه‌های این کانال
-            <span className="ms-auto rounded-full bg-secondary px-2 py-0.5 text-xs text-muted-foreground tabular-nums">{sameChannel.length}</span>
-          </h2>
-          {sameChannel.length === 0 ? (
-            <p className="text-sm text-muted-foreground">
-              {r.power ? "هنوز کسی روی این کانال نیست." : "بیسیم خاموش است."}
-              {r.peers.length > sameChannel.length && ` ${r.peers.length - sameChannel.length} ایستگاه در کانال‌های دیگر.`}
-            </p>
+        {/* Bottom Station / Channel Section */}
+        <section className="rounded-3xl border border-border bg-card/90 p-4 shadow-sm">
+          <div className="flex items-center justify-between pb-3 border-b border-border/40">
+            <div className="flex items-center gap-2">
+              <Users className="size-4 text-primary" />
+              <span className="text-sm font-semibold">دستگاه‌های این کانال</span>
+              <span className="rounded-full bg-secondary px-2 py-0.5 text-xs text-muted-foreground font-mono">
+                {sameChannelPeers.length}
+              </span>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setChannelSheetOpen(true)}
+              className="h-8 rounded-xl text-xs gap-1"
+            >
+              <Wifi className="size-3.5" />
+              تغییر کانال
+            </Button>
+          </div>
+
+          {sameChannelPeers.length === 0 ? (
+            <div className="pt-3 text-center">
+              <p className="text-xs text-muted-foreground">
+                هنوز گوشی دیگری به این کانال متصل نشده است.
+              </p>
+              <p className="mt-1 text-[11px] text-muted-foreground/80">
+                گوشی دوم را به هات‌اسپات وصل کنید و برنامه را باز کنید.
+              </p>
+            </div>
           ) : (
-            <ul className="flex flex-wrap gap-2">
-              {sameChannel.map((p) => (
-                <li key={p.id} className={cn("flex items-center gap-2 rounded-full bg-secondary py-1 ps-1 pe-3 text-sm", r.rx?.includes(p.name) && "ring-2 ring-rx")}>
-                  <span className="grid size-7 place-items-center rounded-full bg-primary/15 text-xs font-bold text-primary">{p.name.trim().charAt(0) || "؟"}</span>
-                  {p.name}
+            <ul className="flex flex-wrap gap-2 pt-3">
+              {sameChannelPeers.map((p) => (
+                <li
+                  key={p.id}
+                  className={cn(
+                    "flex items-center gap-2 rounded-2xl bg-secondary/80 px-3 py-1.5 text-xs font-medium border border-border/50",
+                    r.rx?.includes(p.name) && "border-cyan-500 bg-cyan-500/10 text-cyan-300",
+                  )}
+                >
+                  <span className="grid size-6 place-items-center rounded-full bg-primary/20 text-xs font-bold text-primary">
+                    {p.name.trim().charAt(0) || "؟"}
+                  </span>
+                  <span>{p.name}</span>
+                  {p.ip && <span className="font-mono text-[10px] text-muted-foreground">({p.ip})</span>}
                 </li>
               ))}
             </ul>
           )}
         </section>
+
+        {/* Join Channel Sheet - Two Way Style Modal */}
+        <Sheet open={channelSheetOpen} onOpenChange={setChannelSheetOpen}>
+          <SheetContent side="bottom" className="rounded-t-3xl border-border bg-card p-6" dir="rtl">
+            <SheetHeader className="text-right pb-4">
+              <SheetTitle className="text-lg font-bold">انتخاب و اتصال به کانال</SheetTitle>
+            </SheetHeader>
+
+            <div className="space-y-4">
+              {/* Channel name input */}
+              <div className="space-y-1.5">
+                <Label htmlFor="channelName" className="text-xs text-muted-foreground">
+                  نام یا شماره کانال (عددی یا الفبایی)
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="channelName"
+                    value={r.channel}
+                    onChange={(e) => r.setChannel(e.target.value)}
+                    placeholder="مثال: 1 یا bisim یا wifi"
+                    className="font-medium"
+                  />
+                  <Button
+                    onClick={() => setChannelSheetOpen(false)}
+                    className="rounded-xl px-5"
+                  >
+                    پیوستن
+                  </Button>
+                </div>
+              </div>
+
+              {/* Two Way Style Big Action Cards */}
+              <div className="grid gap-2.5 pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    r.setChannel("wifi");
+                    r.scanNetwork();
+                    setChannelSheetOpen(false);
+                  }}
+                  className="flex items-center justify-between rounded-2xl border border-primary/40 bg-primary/10 p-4 text-right transition-colors hover:bg-primary/20"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="grid size-10 place-items-center rounded-xl bg-primary text-primary-foreground">
+                      <Wifi className="size-5" />
+                    </div>
+                    <div>
+                      <p className="font-bold text-sm text-foreground">اتصال به کانال وای‌فای (Wi-Fi Channel)</p>
+                      <p className="text-xs text-muted-foreground">گفتگو با تمام گوشی‌های متصل به همین نقطه اتصال یا مودم</p>
+                    </div>
+                  </div>
+                  <ChevronLeft className="size-5 text-primary" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    r.setChannel("1");
+                    setChannelSheetOpen(false);
+                  }}
+                  className="flex items-center justify-between rounded-2xl border border-border bg-secondary/50 p-4 text-right transition-colors hover:bg-secondary"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="grid size-10 place-items-center rounded-xl bg-secondary text-foreground">
+                      <MapPin className="size-5" />
+                    </div>
+                    <div>
+                      <p className="font-bold text-sm text-foreground">کانال عمومی محلی (Local Channel 1)</p>
+                      <p className="text-xs text-muted-foreground">کانال پیش‌فرض شماره ۱ برای ارتباط سریع</p>
+                    </div>
+                  </div>
+                  <ChevronLeft className="size-5 text-muted-foreground" />
+                </button>
+              </div>
+
+              {/* Direct IP Connect Option */}
+              <div className="rounded-2xl border border-border/80 bg-background/50 p-4 space-y-2">
+                <Label className="text-xs font-semibold text-foreground">
+                  اتصال مستقیم با IP گوشی مقابل (در صورت نیاز)
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    value={manualIp}
+                    onChange={(e) => setManualIp(e.target.value)}
+                    placeholder="مثال: 192.168.43.1"
+                    className="font-mono text-xs"
+                    dir="ltr"
+                  />
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => {
+                      if (manualIp.trim()) {
+                        r.addPeerManual(manualIp.trim());
+                        setManualIp("");
+                        setChannelSheetOpen(false);
+                      }
+                    }}
+                    className="shrink-0 text-xs"
+                  >
+                    اتصال به IP
+                  </Button>
+                </div>
+                {r.networkInfo?.ip && (
+                  <p className="text-[11px] text-muted-foreground">
+                    آی‌پی این گوشی: <span className="font-mono text-foreground font-bold">{r.networkInfo.ip}</span>
+                  </p>
+                )}
+              </div>
+            </div>
+          </SheetContent>
+        </Sheet>
       </div>
     </main>
   );
@@ -234,25 +402,25 @@ function SettingsSheet({ r }: { r: ReturnType<typeof useRadio> }) {
   return (
     <Sheet>
       <SheetTrigger asChild>
-        <Button size="icon" variant="secondary" className="size-10 rounded-full" aria-label="تنظیمات">
-          <Settings2 />
+        <Button size="icon" variant="ghost" className="size-9 rounded-full text-muted-foreground hover:text-foreground" aria-label="تنظیمات">
+          <Settings2 className="size-4" />
         </Button>
       </SheetTrigger>
-      <SheetContent side="bottom" className="rounded-t-3xl border-border" dir="rtl">
-        <SheetHeader className="pr-12">
-          <SheetTitle className="text-right">تنظیمات</SheetTitle>
+      <SheetContent side="bottom" className="rounded-t-3xl border-border bg-card p-6" dir="rtl">
+        <SheetHeader className="pr-2 pb-4">
+          <SheetTitle className="text-right">تنظیمات بیسیم</SheetTitle>
         </SheetHeader>
-        <div className="mx-auto w-full max-w-md space-y-6 px-4 pb-8">
-          <Field label="نام شما" htmlFor="name">
-            <Input id="name" value={r.name} maxLength={20} onChange={(e) => r.setName(e.target.value)} />
+        <div className="mx-auto w-full max-w-md space-y-5">
+          <Field label="نام نمایشی شما">
+            <Input value={r.name} maxLength={20} onChange={(e) => r.setName(e.target.value)} />
           </Field>
-          <Field label="بلندی صدا">
+          <Field label="بلندی صدای بلندگو">
             <Slider value={[r.volume * 100]} max={100} step={1} onValueChange={([v]) => r.setVolume((v ?? 0) / 100)} />
           </Field>
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between pt-2">
             <div>
-              <Label htmlFor="fx">افکت صدای رادیویی</Label>
-              <p className="text-xs text-muted-foreground">صدای بیسیمی با نویز کوتاه پایان پیام</p>
+              <Label htmlFor="fx">افکت رادیویی بیسیم</Label>
+              <p className="text-xs text-muted-foreground">صدای طبیعی بیسیم با نویز پایان مکالمه (Roger)</p>
             </div>
             <Switch id="fx" dir="ltr" checked={r.effect} onCheckedChange={r.setEffect} />
           </div>
@@ -262,10 +430,10 @@ function SettingsSheet({ r }: { r: ReturnType<typeof useRadio> }) {
   );
 }
 
-function Field({ label, htmlFor, children }: { label: string; htmlFor?: string; children: ReactNode }) {
+function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <div className="space-y-2">
-      <Label htmlFor={htmlFor}>{label}</Label>
+    <div className="space-y-1.5">
+      <Label className="text-xs text-muted-foreground">{label}</Label>
       {children}
     </div>
   );

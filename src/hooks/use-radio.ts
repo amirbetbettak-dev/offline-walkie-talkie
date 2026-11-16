@@ -1,16 +1,32 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { RadioAudio } from "@/lib/radio/audio";
-import { channelFrequency, decodePcm, encodePcm, shouldAccept, type RadioMessage } from "@/lib/radio/protocol";
+import {
+  channelFrequency,
+  decodePcm,
+  encodePcm,
+  frequencyChannel,
+  shouldAccept,
+  type RadioMessage,
+} from "@/lib/radio/protocol";
 import {
   createUdpTransport,
+  fetchNetworkInfo,
   isNativeApp,
   routeToLoudspeaker,
+  type NetworkInfo,
   type Transport,
   type TransportStatus,
 } from "@/lib/radio/transport";
 
-export type Peer = { id: string; name: string; freq: number; seen: number };
+export type Peer = {
+  id: string;
+  name: string;
+  freq: number;
+  channel?: string;
+  ip?: string;
+  seen: number;
+};
 
 function loadSetting<T>(key: string, fallback: T): T {
   try {
@@ -24,14 +40,16 @@ function loadSetting<T>(key: string, fallback: T): T {
 export function useRadio() {
   const [id] = useState(() => Math.random().toString(36).slice(2, 10));
   const [ready, setReady] = useState(false);
-  const [power, setPower] = useState(false);
+  const [power, setPower] = useState(true); // Default to active for zero-friction
   const [name, setName] = useState("ایستگاه");
+  const [channel, setChannelState] = useState("1");
   const [freq, setFreq] = useState(channelFrequency(1));
   const [native, setNative] = useState(true);
   const [volume, setVolume] = useState(0.9);
   const [effect, setEffect] = useState(true);
   const [status, setStatus] = useState<TransportStatus>("offline");
   const [peers, setPeers] = useState<Peer[]>([]);
+  const [networkInfo, setNetworkInfo] = useState<NetworkInfo | null>(null);
   const [tx, setTx] = useState(false);
   const [rx, setRx] = useState<string | null>(null);
   const [level, setLevel] = useState(0);
@@ -42,24 +60,33 @@ export function useRadio() {
   const transport = useRef<Transport | null>(null);
   const peersRef = useRef(new Map<string, Peer>());
   const talkers = useRef(new Map<string, string>()); // id -> name
-  const st = useRef({ name, freq, tx });
-  st.current = { name, freq, tx };
+  const st = useRef({ name, freq, channel, tx });
+  st.current = { name, freq, channel, tx };
+
+  const setChannel = useCallback((newCh: string) => {
+    setChannelState(newCh);
+    const num = parseInt(newCh, 10);
+    if (!isNaN(num) && num >= 1 && num <= 16) {
+      setFreq(channelFrequency(num));
+    }
+  }, []);
 
   // Load persisted settings after hydration
   useEffect(() => {
-    setName(loadSetting("name", "ایستگاه " + Math.floor(Math.random() * 90 + 10)));
-    setFreq(loadSetting("freq", channelFrequency(1)));
+    setName(loadSetting("name", "گوشی " + Math.floor(Math.random() * 900 + 100)));
+    const savedChannel = loadSetting("channel", "1");
+    setChannel(savedChannel);
     setNative(isNativeApp());
     setVolume(loadSetting("volume", 0.9));
     setEffect(loadSetting("effect", true));
     setReady(true);
-  }, []);
+  }, [setChannel]);
 
   useEffect(() => {
     if (!ready) return;
-    const s = { name, freq, volume, effect };
+    const s = { name, channel, volume, effect };
     for (const [k, v] of Object.entries(s)) localStorage.setItem("bisim:" + k, JSON.stringify(v));
-  }, [ready, name, freq, volume, effect]);
+  }, [ready, name, channel, volume, effect]);
 
   useEffect(() => audio.current?.setVolume(volume), [volume]);
   useEffect(() => {
@@ -68,8 +95,13 @@ export function useRadio() {
 
   const refreshPeers = useCallback(() => {
     const now = Date.now();
-    for (const [k, p] of peersRef.current) if (now - p.seen > 7000) peersRef.current.delete(k);
+    for (const [k, p] of peersRef.current) if (now - p.seen > 8000) peersRef.current.delete(k);
     setPeers([...peersRef.current.values()]);
+  }, []);
+
+  const updateNetwork = useCallback(async () => {
+    const info = await fetchNetworkInfo();
+    if (info) setNetworkInfo(info);
   }, []);
 
   const updateRx = () => {
@@ -90,12 +122,19 @@ export function useRadio() {
   }, []);
 
   const handle = useCallback(
-    (msg: RadioMessage) => {
-      if (!shouldAccept(msg, id, st.current.freq)) return;
+    (msg: RadioMessage, fromIp?: string) => {
+      if (!shouldAccept(msg, id, st.current.freq, st.current.channel)) return;
       const a = audio.current;
       switch (msg.t) {
         case "hello":
-          peersRef.current.set(msg.id, { id: msg.id, name: msg.name, freq: msg.freq, seen: Date.now() });
+          peersRef.current.set(msg.id, {
+            id: msg.id,
+            name: msg.name,
+            freq: msg.freq,
+            channel: msg.channel,
+            ip: fromIp || msg.ip,
+            seen: Date.now(),
+          });
           refreshPeers();
           break;
         case "bye":
@@ -124,26 +163,40 @@ export function useRadio() {
     [id, refreshPeers, endTalk],
   );
 
-  const send = useCallback((m: RadioMessage) => transport.current?.send(m), []);
-  const hello = useCallback(
-    () => send({ t: "hello", id, name: st.current.name, freq: st.current.freq }),
-    [id, send],
-  );
+  const send = useCallback((m: RadioMessage, targetIp?: string) => {
+    transport.current?.send(m, targetIp);
+  }, []);
+
+  const hello = useCallback(() => {
+    send({
+      t: "hello",
+      id,
+      name: st.current.name,
+      freq: st.current.freq,
+      channel: st.current.channel,
+    });
+  }, [id, send]);
 
   // Connect / reconnect transport while powered
   useEffect(() => {
     if (!power) return;
     const h = { onMessage: handle, onStatus: setStatus };
     transport.current = createUdpTransport(h);
+
     const beat = setInterval(() => {
       hello();
       refreshPeers();
     }, 2000);
-    const first = setTimeout(hello, 300);
+
+    const first = setTimeout(() => {
+      hello();
+      updateNetwork();
+    }, 400);
+
     return () => {
       clearInterval(beat);
       clearTimeout(first);
-      send({ t: "bye", id, freq: st.current.freq });
+      send({ t: "bye", id, freq: st.current.freq, channel: st.current.channel });
       transport.current?.close();
       transport.current = null;
       peersRef.current.clear();
@@ -151,21 +204,35 @@ export function useRadio() {
       setRx(null);
       setPeers([]);
     };
-  }, [power, handle, hello, refreshPeers, send, id]);
+  }, [power, handle, hello, refreshPeers, send, id, updateNetwork]);
 
-  // Announce new name / frequency right away
+  // Announce new name / frequency / channel right away
   useEffect(() => {
-    if (power) hello();
+    if (power) {
+      hello();
+      transport.current?.scan().catch(() => {});
+      updateNetwork();
+    }
     talkers.current.clear();
     setRx(null);
     audio.current?.rxStatic(false);
-  }, [power, name, freq, hello]);
+  }, [power, name, freq, channel, hello, updateNetwork]);
 
   useEffect(() => {
-    const close = () => send({ t: "bye", id, freq: st.current.freq });
+    const close = () => send({ t: "bye", id, freq: st.current.freq, channel: st.current.channel });
     window.addEventListener("pagehide", close);
     return () => window.removeEventListener("pagehide", close);
   }, [id, send]);
+
+  const ensureAudio = useCallback(async () => {
+    if (!audio.current) {
+      audio.current = new RadioAudio();
+      audio.current.setVolume(volume);
+      audio.current.effect = effect;
+    }
+    await audio.current.initMic();
+    routeToLoudspeaker();
+  }, [volume, effect]);
 
   const togglePower = useCallback(async () => {
     if (power) {
@@ -175,21 +242,50 @@ export function useRadio() {
     }
     setError(null);
     try {
-      if (!audio.current) audio.current = new RadioAudio();
-      audio.current.setVolume(volume);
-      audio.current.effect = effect;
-      await audio.current.initMic();
-      routeToLoudspeaker();
+      await ensureAudio();
       setPower(true);
-      audio.current.roger();
+      audio.current?.roger();
+      updateNetwork();
     } catch {
-      setError("دسترسی به میکروفون داده نشد. اجازه میکروفون را فعال کنید.");
+      setError("اجازه دسترسی به میکروفون را در تنظیمات فعال کنید.");
     }
-  }, [power, volume, effect]);
+  }, [power, ensureAudio, updateNetwork]);
 
-  const pttDown = useCallback(() => {
+  const scanNetwork = useCallback(async () => {
+    setNotice("در حال جستجوی گوشی‌های متصل به هات‌اسپات…");
+    try {
+      const helloJson = JSON.stringify({ t: "hello", id, name: st.current.name, freq: st.current.freq, channel: st.current.channel }); await transport.current?.scan(helloJson);
+      hello();
+      await updateNetwork();
+    } catch {}
+    setTimeout(() => setNotice(null), 2500);
+  }, [hello, updateNetwork]);
+
+  const addPeerManual = useCallback(
+    async (ip: string) => {
+      if (!ip) return;
+      await transport.current?.addPeerIp(ip);
+      hello();
+      await updateNetwork();
+    },
+    [hello, updateNetwork],
+  );
+
+  const pttDown = useCallback(async () => {
+    if (!power) {
+      await togglePower();
+      return;
+    }
+    if (!audio.current) {
+      try {
+        await ensureAudio();
+      } catch {
+        setError("دسترسی به میکروفون داده نشد.");
+        return;
+      }
+    }
     const a = audio.current;
-    if (!power || !a || st.current.tx) return;
+    if (!a || st.current.tx) return;
     if (talkers.current.size > 0) {
       a.busy();
       navigator.vibrate?.([60, 60, 60]);
@@ -198,14 +294,27 @@ export function useRadio() {
       return;
     }
     setTx(true);
-    navigator.vibrate?.(25);
+    navigator.vibrate?.(30);
     a.chirp();
-    send({ t: "start", id, name: st.current.name, freq: st.current.freq });
+    send({
+      t: "start",
+      id,
+      name: st.current.name,
+      freq: st.current.freq,
+      channel: st.current.channel,
+    });
     a.startCapture(
-      (pcm) => send({ t: "audio", id, freq: st.current.freq, data: encodePcm(pcm) }),
+      (pcm) =>
+        send({
+          t: "audio",
+          id,
+          freq: st.current.freq,
+          channel: st.current.channel,
+          data: encodePcm(pcm),
+        }),
       setLevel,
     );
-  }, [power, id, send]);
+  }, [power, togglePower, ensureAudio, id, send]);
 
   const pttUp = useCallback(() => {
     const a = audio.current;
@@ -213,15 +322,38 @@ export function useRadio() {
     a.stopCapture();
     setTx(false);
     setLevel(0);
-    send({ t: "end", id, freq: st.current.freq });
+    send({ t: "end", id, freq: st.current.freq, channel: st.current.channel });
     a.roger();
-    navigator.vibrate?.(15);
-
+    navigator.vibrate?.(20);
   }, [id, send]);
 
   return {
-    id, native, power, name, setName, freq, setFreq,
-    volume, setVolume, effect, setEffect, status, peers, tx, rx, level,
-    error, notice, togglePower, pttDown, pttUp, analyser: () => audio.current?.analyser ?? null,
+    id,
+    native,
+    power,
+    name,
+    setName,
+    channel,
+    setChannel,
+    freq,
+    setFreq,
+    volume,
+    setVolume,
+    effect,
+    setEffect,
+    status,
+    peers,
+    networkInfo,
+    tx,
+    rx,
+    level,
+    error,
+    notice,
+    togglePower,
+    scanNetwork,
+    addPeerManual,
+    pttDown,
+    pttUp,
+    analyser: () => audio.current?.analyser ?? null,
   };
 }

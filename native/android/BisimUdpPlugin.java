@@ -5,6 +5,15 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.media.AudioFormat;
+import android.media.AudioAttributes;
+import android.media.audiofx.AcousticEchoCanceler;
+import android.media.audiofx.AutomaticGainControl;
+import android.media.audiofx.NoiseSuppressor;
+import android.os.Process;
+import android.os.SystemClock;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import org.json.JSONObject;
 import android.media.AudioManager;
 import android.media.AudioRecord;
 import android.media.AudioTrack;
@@ -88,7 +97,29 @@ public class BisimUdpPlugin extends Plugin {
     private AudioRecord audioRecord;
     private final AtomicBoolean isTransmitting = new AtomicBoolean(false);
     private Thread txThread;
-    private int currentChannelHash = 1;
+    private volatile int currentChannelHash = VoiceEngine.channelKey("1");
+    private volatile String currentChannel = "1";
+    private volatile double currentFrequency = 446.00625;
+    private volatile float outputVolume = 0.9f;
+    private final Map<String, VoiceEngine.JitterBuffer> jitterBuffers = new ConcurrentHashMap<>();
+    private Thread playbackThread;
+    private AcousticEchoCanceler aec;
+    private NoiseSuppressor ns;
+    private AutomaticGainControl agc;
+    private volatile boolean hardwareAgc, hardwareNs;
+    private volatile int wifiRssi = -100;
+    private volatile List<InetAddress> audioTargets = Collections.emptyList();
+    private volatile List<InetAddress> cachedTargets = Collections.emptyList();
+    private volatile Set<String> localAddresses = Collections.emptySet();
+    private volatile String networkAddress;
+    private final int audioSession = new java.security.SecureRandom().nextInt();
+    private final AtomicInteger audioSequence = new AtomicInteger();
+    private final ExecutorService sendExecutor = Executors.newSingleThreadExecutor();
+    private volatile long lastSweep;
+
+    private int voiceChannel() {
+        return VoiceEngine.channelKey(currentChannel) ^ Double.valueOf(currentFrequency).hashCode();
+    }
     private final ExecutorService sweepExecutor = Executors.newFixedThreadPool(16);
 
     @PluginMethod
@@ -120,11 +151,17 @@ public class BisimUdpPlugin extends Plugin {
             socket = new DatagramSocket(null);
             socket.setReuseAddress(true);
             socket.setBroadcast(true);
+            socket.setReceiveBufferSize(64 * 1024);
+            socket.setSendBufferSize(64 * 1024);
+            socket.setSoTimeout(1000);
             socket.bind(new InetSocketAddress(port));
+            refreshTargets();
             running = true;
 
             listenThread = new Thread(this::listenLoop, "BisimUdpListener");
             listenThread.start();
+            playbackThread = new Thread(this::playbackLoop, "BisimPlayback");
+            playbackThread.start();
 
             heartbeatThread = new Thread(this::heartbeatLoop, "BisimHeartbeat");
             heartbeatThread.start();
@@ -137,35 +174,85 @@ public class BisimUdpPlugin extends Plugin {
             res.put("port", port);
             call.resolve(res);
         } catch (Exception e) {
+            stopInternal();
             call.reject("Failed to start UDP: " + e.getMessage(), e);
         }
     }
 
     private void initAudioTrack() {
+        int min = AudioTrack.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        if (min <= 0) throw new IllegalStateException("Audio output unavailable");
+        audioTrack = new AudioTrack.Builder()
+                .setAudioAttributes(new AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                .setAudioFormat(new AudioFormat.Builder().setSampleRate(SAMPLE_RATE)
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
+                .setBufferSizeInBytes(Math.max(min, 1280))
+                .setTransferMode(AudioTrack.MODE_STREAM).setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY).build();
+        audioTrack.setVolume(outputVolume);
+        audioTrack.play();
+        AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
+        if (am != null) { am.setMode(AudioManager.MODE_IN_COMMUNICATION); am.setSpeakerphoneOn(true); }
+    }
+
+    private void playbackLoop() {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
+        long next = SystemClock.elapsedRealtime();
+        boolean playing = false;
+        while (running) {
+            try {
+                long now = SystemClock.elapsedRealtime();
+                if (now < next) { Thread.sleep(Math.min(20, next - now)); continue; }
+                next = now + VoiceEngine.FRAME_MS;
+                int[] mix = new int[VoiceEngine.SAMPLES];
+                boolean available = false;
+                for (Map.Entry<String, VoiceEngine.JitterBuffer> entry : jitterBuffers.entrySet()) {
+                    byte[] pcm = entry.getValue().poll(now);
+                    if (pcm == null) continue;
+                    available = true;
+                    for (int i = 0; i < mix.length; i++) mix[i] += (short) ((pcm[2*i] & 255) | (pcm[2*i+1] << 8));
+                }
+                AudioTrack track = audioTrack;
+                if (track == null) continue;
+                if (!available) {
+                    if (playing) { track.pause(); track.flush(); playing = false; }
+                    rxAudioLevel.set(0);
+                    continue;
+                }
+                if (!playing) { track.play(); playing = true; }
+                byte[] output = new byte[VoiceEngine.SAMPLES * 2];
+                long sum = 0;
+                for (int i = 0; i < mix.length; i++) {
+                    int value = Math.max(-30000, Math.min(30000, mix[i]));
+                    sum += Math.abs(value);
+                    output[2*i] = (byte) value; output[2*i+1] = (byte) (value >> 8);
+                }
+                rxAudioLevel.set((int) Math.min(100, sum / mix.length / 120));
+                int written = track.write(output, 0, output.length, AudioTrack.WRITE_NON_BLOCKING);
+                if (written < output.length) { track.pause(); track.flush(); track.play(); }
+            } catch (InterruptedException e) { break; }
+            catch (Exception ignored) {}
+        }
+    }
+
+    private void refreshTargets() {
+        Set<String> locals = new LinkedHashSet<>();
         try {
-            int bufferSize = AudioTrack.getMinBufferSize(
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_OUT_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT
-            );
-            if (bufferSize < 4096) bufferSize = 4096;
-
-            audioTrack = new AudioTrack(
-                    AudioManager.STREAM_MUSIC,
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_OUT_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufferSize * 2,
-                    AudioTrack.MODE_STREAM
-            );
-            audioTrack.play();
-
-            AudioManager am = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
-            if (am != null) {
-                am.setMode(AudioManager.MODE_IN_COMMUNICATION);
-                am.setSpeakerphoneOn(true);
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                if (!ni.isUp() || ni.isLoopback()) continue;
+                for (InetAddress a : Collections.list(ni.getInetAddresses())) locals.add(a.getHostAddress());
             }
         } catch (Exception ignored) {}
+        localAddresses = locals;
+        Set<InetAddress> targets = new LinkedHashSet<>();
+        for (String ip : peersMap.keySet()) try { targets.add(InetAddress.getByName(ip)); } catch (Exception ignored) {}
+        audioTargets = new ArrayList<>(targets);
+        WifiManager wm = (WifiManager) getContext().getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        try { wifiRssi = wm != null && wm.isWifiEnabled() ? wm.getConnectionInfo().getRssi() : -100; }
+        catch (Exception ignored) { wifiRssi = -100; }
+        targets.addAll(getBroadcastAddresses());
+        try { targets.add(InetAddress.getByName("255.255.255.255")); } catch (Exception ignored) {}
+        cachedTargets = new ArrayList<>(targets);
     }
 
     private void listenLoop() {
@@ -182,7 +269,7 @@ public class BisimUdpPlugin extends Plugin {
 
                 rxPacketsCount.incrementAndGet();
                 rxBytesCount.addAndGet(len);
-                lastRxTimestamp = System.currentTimeMillis();
+                
 
                 PeerRecord peer = peersMap.get(from);
                 boolean isNew = (peer == null);
@@ -200,22 +287,15 @@ public class BisimUdpPlugin extends Plugin {
                     byte type = data[offset + 2];
                     int channel = data[offset + 3] & 0xFF;
 
-                    if (type == TYPE_AUDIO) {
-                        int pcmLen = len - 8;
-                        if (pcmLen > 0 && audioTrack != null) {
-                            audioTrack.write(data, offset + 8, pcmLen);
-
-                            // Calculate RMS volume level (0-100)
-                            int sum = 0;
-                            int count = pcmLen / 2;
-                            for (int i = 0; i < count; i++) {
-                                int sample = (data[offset + 8 + i * 2] & 0xFF) | (data[offset + 8 + i * 2 + 1] << 8);
-                                sum += Math.abs(sample);
-                            }
-                            int avg = count > 0 ? sum / count : 0;
-                            rxAudioLevel.set(Math.min(100, avg / 120));
-                            lastRxSender = from;
+                    if (type == VoiceEngine.AUDIO_V2) {
+                        VoiceEngine.Frame frame = VoiceEngine.decode(data, offset, len);
+                        if (frame != null && frame.channel == voiceChannel() && !isTransmitting.get()) {
+                            jitterBuffers.computeIfAbsent(from, key -> new VoiceEngine.JitterBuffer()).offer(frame, SystemClock.elapsedRealtime());
+                            lastRxTimestamp = System.currentTimeMillis();
+                            lastRxSender = peer.name.isEmpty() ? from : peer.name;
                         }
+                    } else if (type == TYPE_AUDIO) {
+                        // Legacy PCM is intentionally not mixed with v2: upgrade both phones together.
                     } else if (type == TYPE_PING) {
                         // Reply with PONG directly to sender
                         sendRawPacket(new byte[]{MAGIC_BYTE_1, MAGIC_BYTE_2, TYPE_PONG, (byte) currentChannelHash, 0, 0, 0, 0}, from);
@@ -224,18 +304,13 @@ public class BisimUdpPlugin extends Plugin {
                     // JSON text message (hello / bye / start / end / audio)
                     String text = new String(data, offset, len, StandardCharsets.UTF_8);
                     try {
-                        if (text.contains("\"t\":\"hello\"") || text.contains("\"t\":\"start\"")) {
-                            if (text.contains("\"name\":\"")) {
-                                int s = text.indexOf("\"name\":\"") + 8;
-                                int e = text.indexOf("\"", s);
-                                if (s > 7 && e > s) peer.name = text.substring(s, e);
-                            }
-                            if (text.contains("\"channel\":\"")) {
-                                int s = text.indexOf("\"channel\":\"") + 11;
-                                int e = text.indexOf("\"", s);
-                                if (s > 10 && e > s) peer.channel = text.substring(s, e);
-                            }
+                        JSONObject message = new JSONObject(text);
+                        String type = message.optString("t");
+                        if (type.equals("hello") || type.equals("start")) {
+                            peer.name = message.optString("name", peer.name);
+                            peer.channel = message.optString("channel", peer.channel);
                         }
+                        if (type.equals("bye")) peersMap.remove(from);
                     } catch (Exception ignored) {}
 
                     if (isNew) {
@@ -258,9 +333,23 @@ public class BisimUdpPlugin extends Plugin {
     private void heartbeatLoop() {
         while (running) {
             try {
-                Thread.sleep(2000);
+                Thread.sleep(1000);
                 if (!running) break;
 
+                String newAddress = getLocalIpAddress();
+                boolean changed = !java.util.Objects.equals(networkAddress, newAddress);
+                networkAddress = newAddress;
+                refreshTargets();
+                if (changed || peersMap.isEmpty()) triggerSubnetSweep(null);
+                if (socket == null || socket.isClosed()) {
+                    DatagramSocket replacement = new DatagramSocket(null);
+                    replacement.setReuseAddress(true); replacement.setBroadcast(true);
+                    replacement.setReceiveBufferSize(64 * 1024); replacement.setSoTimeout(1000);
+                    replacement.bind(new InetSocketAddress(currentPort)); socket = replacement;
+                    if (listenThread == null || !listenThread.isAlive()) {
+                        listenThread = new Thread(this::listenLoop, "BisimUdpListener"); listenThread.start();
+                    }
+                }
                 // Ping gateway (hotspot) and all known peers
                 String myIp = getLocalIpAddress();
                 if (myIp != null) {
@@ -276,6 +365,7 @@ public class BisimUdpPlugin extends Plugin {
                 // Cleanup stale peers (> 8 seconds inactive)
                 long now = System.currentTimeMillis();
                 peersMap.entrySet().removeIf(entry -> (now - entry.getValue().lastSeen) > 8000);
+                jitterBuffers.keySet().removeIf(ip -> !peersMap.containsKey(ip));
 
                 // Reset RX audio level if quiet for > 300ms
                 if (now - lastRxTimestamp > 300) {
@@ -287,104 +377,92 @@ public class BisimUdpPlugin extends Plugin {
         }
     }
 
-    @PluginMethod
-    public void startNativeTx(PluginCall call) {
-        if (isTransmitting.get()) {
-            call.resolve();
-            return;
+    private synchronized void prepareRecorder() {
+        if (audioRecord != null && audioRecord.getState() == AudioRecord.STATE_INITIALIZED) return;
+        if (ContextCompat.checkSelfPermission(getContext(), Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED)
+            throw new SecurityException("اجازه میکروفون را فعال کنید");
+        int min = AudioRecord.getMinBufferSize(SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
+        if (min <= 0) throw new IllegalStateException("Microphone unavailable");
+        audioRecord = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(min, 1280));
+        if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
+            audioRecord.release(); audioRecord = null; throw new IllegalStateException("Microphone initialization failed");
         }
-
-        try {
-            int minBuf = AudioRecord.getMinBufferSize(
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT
-            );
-            int bufSize = Math.max(minBuf, 4096);
-
-            Context ctx = getContext();
-            if (ContextCompat.checkSelfPermission(ctx, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-                call.reject("میکروفون اجازه ندارد");
-                return;
-            }
-
-            audioRecord = new AudioRecord(
-                    MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                    SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT,
-                    bufSize
-            );
-
-            if (audioRecord.getState() != AudioRecord.STATE_INITIALIZED) {
-                call.reject("خطا در راه‌اندازی ضبط صدا");
-                return;
-            }
-
-            audioRecord.startRecording();
-            isTransmitting.set(true);
-
-            txThread = new Thread(() -> {
-                byte[] pcmBuf = new byte[640]; // 20ms frames at 16000Hz (320 samples * 2 bytes)
-                byte[] packetBuf = new byte[648]; // 8 bytes header + 640 bytes PCM
-                packetBuf[0] = MAGIC_BYTE_1;
-                packetBuf[1] = MAGIC_BYTE_2;
-                packetBuf[2] = TYPE_AUDIO;
-                packetBuf[3] = (byte) currentChannelHash;
-
-                int seq = 0;
-                while (isTransmitting.get() && audioRecord != null && audioRecord.getRecordingState() == AudioRecord.RECORDSTATE_RECORDING) {
-                    int read = audioRecord.read(pcmBuf, 0, pcmBuf.length);
-                    if (read > 0) {
-                        seq++;
-                        packetBuf[4] = (byte) ((seq >> 24) & 0xFF);
-                        packetBuf[5] = (byte) ((seq >> 16) & 0xFF);
-                        packetBuf[6] = (byte) ((seq >> 8) & 0xFF);
-                        packetBuf[7] = (byte) (seq & 0xFF);
-                        System.arraycopy(pcmBuf, 0, packetBuf, 8, read);
-
-                        // Calculate TX volume level (0-100)
-                        int sum = 0;
-                        int count = read / 2;
-                        for (int i = 0; i < count; i++) {
-                            int sample = (pcmBuf[i * 2] & 0xFF) | (pcmBuf[i * 2 + 1] << 8);
-                            sum += Math.abs(sample);
-                        }
-                        int avg = count > 0 ? sum / count : 0;
-                        txAudioLevel.set(Math.min(100, avg / 120));
-
-                        // Broadcast & unicast to peers
-                        sendRawPacketToAll(packetBuf, read + 8);
-                    }
-                }
-                txAudioLevel.set(0);
-            }, "BisimNativeTx");
-            txThread.start();
-
-            call.resolve();
-        } catch (Exception e) {
-            isTransmitting.set(false);
-            call.reject("خطای ارسال صدا: " + e.getMessage(), e);
-        }
+        int session = audioRecord.getAudioSessionId();
+        try { if (AcousticEchoCanceler.isAvailable()) { aec = AcousticEchoCanceler.create(session); if (aec != null) aec.setEnabled(true); } } catch (Exception ignored) {}
+        try { if (NoiseSuppressor.isAvailable()) { ns = NoiseSuppressor.create(session); if (ns != null) hardwareNs = ns.setEnabled(true) == 0; } } catch (Exception ignored) {}
+        try { if (AutomaticGainControl.isAvailable()) { agc = AutomaticGainControl.create(session); if (agc != null) hardwareAgc = agc.setEnabled(true) == 0; } } catch (Exception ignored) {}
     }
 
     @PluginMethod
-    public void stopNativeTx(PluginCall call) {
-        isTransmitting.set(false);
-        txAudioLevel.set(0);
-        if (audioRecord != null) {
-            try {
-                audioRecord.stop();
-                audioRecord.release();
-            } catch (Exception ignored) {}
-            audioRecord = null;
-        }
-        if (txThread != null) {
-            txThread.interrupt();
-            txThread = null;
-        }
+    public void prepareAudio(PluginCall call) {
+        try { prepareRecorder(); call.resolve(); } catch (Exception e) { call.reject(e.getMessage(), e); }
+    }
+
+    @PluginMethod
+    public void configureAudio(PluginCall call) {
+        outputVolume = Math.max(0f, Math.min(1f, call.getFloat("volume", 0.9f)));
+        if (audioTrack != null) audioTrack.setVolume(outputVolume);
         call.resolve();
     }
+
+    @PluginMethod
+    public synchronized void startNativeTx(PluginCall call) {
+        if (isTransmitting.get()) { call.resolve(); return; }
+        try {
+            if (!running || socket == null || socket.isClosed()) throw new IllegalStateException("ارتباط شبکه آماده نیست");
+            prepareRecorder();
+            AudioRecord recorder = audioRecord;
+            recorder.startRecording();
+            isTransmitting.set(true);
+            jitterBuffers.clear();
+            final int channel = voiceChannel();
+            txThread = new Thread(() -> {
+                Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
+                VoiceEngine.Processor processor = new VoiceEngine.Processor();
+                byte[] pcm = new byte[VoiceEngine.SAMPLES * 2];
+                byte[] previous = null;
+                try {
+                    while (isTransmitting.get() && running) {
+                        int filled = 0;
+                        while (filled < pcm.length && isTransmitting.get()) {
+                            int n = recorder.read(pcm, filled, pcm.length - filled, AudioRecord.READ_BLOCKING);
+                            if (n <= 0) throw new IllegalStateException("Microphone read failed");
+                            filled += n;
+                        }
+                        if (!isTransmitting.get()) break;
+                        txAudioLevel.set(processor.process(pcm, hardwareAgc, hardwareNs));
+                        // Piggyback the preceding frame on weak/unknown links; recover isolated loss without retransmit delay.
+                        boolean protect = wifiRssi <= -65 || wifiRssi >= 0;
+                        byte[] packet = VoiceEngine.packet(audioSession, channel, audioSequence.incrementAndGet(), pcm, protect ? previous : null);
+                        sendRawPacketToAll(packet, packet.length);
+                        previous = Arrays.copyOf(pcm, pcm.length);
+                    }
+                } catch (Exception e) {
+                    if (isTransmitting.get()) {
+                        JSObject failure = new JSObject(); failure.put("message", "ضبط صدا قطع شد؛ دوباره دکمه صحبت را بزنید.");
+                        notifyListeners("audioError", failure);
+                    }
+                } finally {
+                    isTransmitting.set(false); txAudioLevel.set(0);
+                    try { recorder.stop(); } catch (Exception ignored) {}
+                }
+            }, "BisimNativeTx");
+            txThread.start(); call.resolve();
+        } catch (Exception e) { isTransmitting.set(false); call.reject("خطای ارسال صدا: " + e.getMessage(), e); }
+    }
+
+    private synchronized void stopTransmitting() {
+        isTransmitting.set(false); txAudioLevel.set(0);
+        if (audioRecord != null) try { audioRecord.stop(); } catch (Exception ignored) {}
+        if (txThread != null) {
+            try { txThread.join(250); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            txThread = null;
+        }
+    }
+
+    @PluginMethod
+    public void stopNativeTx(PluginCall call) { stopTransmitting(); call.resolve(); }
 
     @PluginMethod
     public void send(PluginCall call) {
@@ -395,7 +473,7 @@ public class BisimUdpPlugin extends Plugin {
             return;
         }
 
-        new Thread(() -> {
+        sendExecutor.execute(() -> {
             try {
                 byte[] bytes = data.getBytes(StandardCharsets.UTF_8);
                 if (targetIp != null && !targetIp.isEmpty()) {
@@ -407,33 +485,15 @@ public class BisimUdpPlugin extends Plugin {
             } catch (Exception e) {
                 call.reject("Send error: " + e.getMessage(), e);
             }
-        }).start();
+        });
     }
 
     private void sendRawPacketToAll(byte[] bytes, int length) {
         try {
-            DatagramSocket sendSock = (socket != null && !socket.isClosed()) ? socket : new DatagramSocket();
-            sendSock.setBroadcast(true);
-
-            List<InetAddress> targets = new ArrayList<>();
-
-            // 1. Direct unicast to all known peers
-            for (String peerIp : peersMap.keySet()) {
-                try { targets.add(InetAddress.getByName(peerIp)); } catch (Exception ignored) {}
-            }
-
-            // 2. Subnet broadcast
-            targets.addAll(getBroadcastAddresses());
-
-            // 3. Global broadcast
-            try { targets.add(InetAddress.getByName("255.255.255.255")); } catch (Exception ignored) {}
-
-            // 4. Hotspot gateway
-            String myIp = getLocalIpAddress();
-            if (myIp != null && myIp.startsWith("192.168.43.")) {
-                try { targets.add(InetAddress.getByName("192.168.43.1")); } catch (Exception ignored) {}
-            }
-
+            DatagramSocket sendSock = socket;
+            if (!running || sendSock == null || sendSock.isClosed()) return;
+            boolean voice = length > 2 && bytes[2] == VoiceEngine.AUDIO_V2 && bytes[0] == 'B' && bytes[1] == 'S';
+            List<InetAddress> targets = voice && !audioTargets.isEmpty() ? audioTargets : cachedTargets;
             for (InetAddress dest : targets) {
                 try {
                     DatagramPacket packet = new DatagramPacket(bytes, length, dest, currentPort);
@@ -447,7 +507,8 @@ public class BisimUdpPlugin extends Plugin {
 
     private void sendRawPacket(byte[] bytes, String ip) {
         try {
-            DatagramSocket sendSock = (socket != null && !socket.isClosed()) ? socket : new DatagramSocket();
+            DatagramSocket sendSock = socket;
+            if (!running || sendSock == null || sendSock.isClosed()) return;
             InetAddress dest = InetAddress.getByName(ip);
             DatagramPacket packet = new DatagramPacket(bytes, bytes.length, dest, currentPort);
             sendSock.send(packet);
@@ -581,7 +642,14 @@ public class BisimUdpPlugin extends Plugin {
     public void setChannelCode(PluginCall call) {
         String ch = call.getString("channel", "1");
         try {
-            currentChannelHash = Math.abs(ch.hashCode() % 250) + 1;
+            double newFrequency = call.getDouble("frequency", currentFrequency);
+            if (currentChannel.equals(ch) && currentFrequency == newFrequency) { call.resolve(); return; }
+            stopTransmitting();
+            currentChannel = ch;
+            currentChannelHash = VoiceEngine.channelKey(ch);
+            currentFrequency = newFrequency;
+            jitterBuffers.clear();
+            if (audioTrack != null) { audioTrack.pause(); audioTrack.flush(); }
         } catch (Exception ignored) {}
         call.resolve();
     }
@@ -590,7 +658,8 @@ public class BisimUdpPlugin extends Plugin {
     public void addPeer(PluginCall call) {
         String ip = call.getString("ip");
         if (ip != null && !ip.isEmpty()) {
-            peersMap.put(ip.trim(), new PeerRecord(ip.trim()));
+            peersMap.computeIfAbsent(ip.trim(), PeerRecord::new);
+            refreshTargets();
         }
         call.resolve();
     }
@@ -603,6 +672,9 @@ public class BisimUdpPlugin extends Plugin {
     }
 
     private void triggerSubnetSweep(String optionalData) {
+        long now = SystemClock.elapsedRealtime();
+        if (!running || isTransmitting.get() || now - lastSweep < 3000) return;
+        lastSweep = now;
         new Thread(() -> {
             try {
                 String myIp = getLocalIpAddress();
@@ -619,7 +691,8 @@ public class BisimUdpPlugin extends Plugin {
                     if (target.equals(myIp)) continue;
                     sweepExecutor.execute(() -> {
                         try {
-                            DatagramSocket s = (socket != null && !socket.isClosed()) ? socket : new DatagramSocket();
+                            DatagramSocket s = socket;
+                            if (!running || s == null || s.isClosed()) return;
                             s.send(new DatagramPacket(packetBytes, packetBytes.length, InetAddress.getByName(target), currentPort));
                         } catch (Exception ignored) {}
                     });
@@ -650,15 +723,17 @@ public class BisimUdpPlugin extends Plugin {
 
     private void stopInternal() {
         running = false;
-        isTransmitting.set(false);
-        if (txThread != null) {
-            txThread.interrupt();
-            txThread = null;
+        stopTransmitting();
+        if (playbackThread != null) { playbackThread.interrupt();
+            try { playbackThread.join(250); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            playbackThread = null;
         }
-        if (audioRecord != null) {
-            try { audioRecord.release(); } catch (Exception ignored) {}
-            audioRecord = null;
-        }
+        jitterBuffers.clear();
+        if (aec != null) { aec.release(); aec = null; }
+        if (ns != null) { ns.release(); ns = null; }
+        if (agc != null) { agc.release(); agc = null; }
+        hardwareAgc = false; hardwareNs = false;
+        if (audioRecord != null) { try { audioRecord.release(); } catch (Exception ignored) {} audioRecord = null; }
         if (audioTrack != null) {
             try { audioTrack.stop(); audioTrack.release(); } catch (Exception ignored) {}
             audioTrack = null;
@@ -669,10 +744,12 @@ public class BisimUdpPlugin extends Plugin {
         }
         if (listenThread != null) {
             listenThread.interrupt();
+            try { listenThread.join(1100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             listenThread = null;
         }
         if (heartbeatThread != null) {
             heartbeatThread.interrupt();
+            try { heartbeatThread.join(250); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             heartbeatThread = null;
         }
         if (multicastLock != null && multicastLock.isHeld()) {
@@ -729,14 +806,14 @@ public class BisimUdpPlugin extends Plugin {
     }
 
     private boolean isLocalAddress(String ip) {
-        String myIp = getLocalIpAddress();
-        return ip.equals("127.0.0.1") || (myIp != null && ip.equals(myIp));
+        return ip.equals("127.0.0.1") || localAddresses.contains(ip);
     }
 
     @Override
     protected void handleOnDestroy() {
         stopInternal();
         sweepExecutor.shutdownNow();
+        sendExecutor.shutdownNow();
         super.handleOnDestroy();
     }
 }

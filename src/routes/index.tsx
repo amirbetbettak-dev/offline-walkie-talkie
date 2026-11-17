@@ -34,7 +34,7 @@ import { useRadio } from "@/hooks/use-radio";
 import { CHANNEL_COUNT } from "@/lib/radio/protocol";
 import { cn } from "@/lib/utils";
 
-const TITLE = "بیسیم — Walkie Talkie آفلاین";
+const TITLE = "bisim tak — بیسیم آفلاین";
 const DESC = "بیسیم PTT آفلاین برای ارتباط صوتی از طریق وای‌فای و هات‌اسپات محلی بدون اینترنت.";
 
 export const Route = createFileRoute("/")({
@@ -44,6 +44,8 @@ export const Route = createFileRoute("/")({
       { name: "description", content: DESC },
       { property: "og:title", content: TITLE },
       { property: "og:description", content: DESC },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary" },
     ],
   }),
   component: Index,
@@ -697,7 +699,7 @@ function SettingsSheet({ r }: { r: ReturnType<typeof useRadio> }) {
       </SheetTrigger>
       <SheetContent side="bottom" className="rounded-t-3xl border-border bg-card p-6" dir="rtl">
         <SheetHeader className="pr-2 pb-4">
-          <SheetTitle className="text-right">تنظیمات بیسیم</SheetTitle>
+          <SheetTitle className="text-right">تنظیمات bisim tak</SheetTitle>
         </SheetHeader>
         <div className="mx-auto w-full max-w-md space-y-5">
           <Field label="نام نمایشی شما در شبکه">

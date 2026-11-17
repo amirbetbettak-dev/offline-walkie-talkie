@@ -81,7 +81,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "بیسیم آفلاین" },
+      { title: "bisim tak" },
       { name: "description", content: "بیسیم آفلاین روی وای‌فای و هات‌اسپات محلی" },
       { name: "theme-color", content: "#14171f" },
     ],

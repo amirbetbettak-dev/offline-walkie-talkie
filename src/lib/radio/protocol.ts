@@ -1,4 +1,4 @@
-// Wire protocol shared by every transport (BroadcastChannel, LAN relay, native UDP).
+// JSON signaling over native LAN UDP. Binary voice framing lives in native VoiceEngine.
 export const BASE_FREQ = 446.00625; // PMR446 channel 1 (MHz)
 export const FREQ_STEP = 0.0125; // 12.5 kHz
 export const CHANNEL_COUNT = 16;

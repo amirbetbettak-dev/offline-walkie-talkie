@@ -3,14 +3,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { RadioAudio } from "@/lib/radio/audio";
 import {
   channelFrequency,
-  decodePcm,
-  encodePcm,
-  frequencyChannel,
   shouldAccept,
   type RadioMessage,
 } from "@/lib/radio/protocol";
 import {
   createUdpTransport,
+  prepareNativeAudio,
+  configureNativeAudio,
   fetchNetworkInfo,
   isNativeApp,
   openWifiSettingsNative,
@@ -26,10 +25,10 @@ export type Peer = {
   id: string;
   name: string;
   freq: number;
-  channel?: string;
-  groupName?: string;
-  groupCode?: string;
-  ip?: string;
+  channel?: string | undefined;
+  groupName?: string | undefined;
+  groupCode?: string | undefined;
+  ip?: string | undefined;
   seen: number;
 };
 
@@ -37,7 +36,7 @@ export type DiscoveredGroup = {
   code: string;
   name: string;
   hostName: string;
-  hostIp?: string;
+  hostIp?: string | undefined;
   lastSeen: number;
 };
 
@@ -60,7 +59,7 @@ export function useRadio() {
   const [freq, setFreq] = useState(channelFrequency(1));
   const [native, setNative] = useState(true);
   const [volume, setVolume] = useState(0.9);
-  const [effect, setEffect] = useState(true);
+  const [effect, setEffect] = useState(false);
   const [status, setStatus] = useState<TransportStatus>("offline");
   const [peers, setPeers] = useState<Peer[]>([]);
   const [groups, setGroups] = useState<DiscoveredGroup[]>([]);
@@ -78,6 +77,8 @@ export function useRadio() {
   const peersRef = useRef(new Map<string, Peer>());
   const groupsRef = useRef(new Map<string, DiscoveredGroup>());
   const talkers = useRef(new Map<string, string>());
+  const talkIntent = useRef(false);
+  const startingTalk = useRef(false);
   const st = useRef({ name, freq, channel, groupName, tx });
   st.current = { name, freq, channel, groupName, tx };
 
@@ -88,7 +89,7 @@ export function useRadio() {
     if (!isNaN(num) && num >= 1 && num <= 16) {
       setFreq(channelFrequency(num));
     }
-    transport.current?.setChannelCode(newCh);
+
   }, []);
 
   // Load persisted settings
@@ -99,7 +100,7 @@ export function useRadio() {
     setChannel(savedChannel, savedGroupName);
     setNative(isNativeApp());
     setVolume(loadSetting("volume", 0.9));
-    setEffect(loadSetting("effect", true));
+    setEffect(loadSetting("effect", false));
     setReady(true);
   }, [setChannel]);
 
@@ -109,7 +110,10 @@ export function useRadio() {
     for (const [k, v] of Object.entries(s)) localStorage.setItem("bisim:" + k, JSON.stringify(v));
   }, [ready, name, channel, groupName, volume, effect]);
 
-  useEffect(() => audio.current?.setVolume(volume), [volume]);
+  useEffect(() => {
+    audio.current?.setVolume(volume);
+    configureNativeAudio(volume);
+  }, [volume, status]);
   useEffect(() => {
     if (audio.current) audio.current.effect = effect;
   }, [effect]);
@@ -131,11 +135,19 @@ export function useRadio() {
       } else if (!info.rxActive && talkers.current.size === 0) {
         setRx(null);
       }
-      if (info.txLevel > 0) {
-        setLevel(info.txLevel / 100);
+      setLevel(info.txLevel / 100);
+      if (!info.rxActive) { talkers.current.clear(); setRx(null); }
+      if (!info.txActive && st.current.tx && !startingTalk.current) {
+        st.current.tx = false; setTx(false);
       }
     }
   }, []);
+
+  useEffect(() => {
+    if (!power || !native) return;
+    const timer = setInterval(updateNetwork, 150);
+    return () => clearInterval(timer);
+  }, [power, native, updateNetwork]);
 
   const updateRx = () => {
     const names = [...talkers.current.values()];
@@ -157,7 +169,6 @@ export function useRadio() {
   const handle = useCallback(
     (msg: RadioMessage, fromIp?: string) => {
       if (!shouldAccept(msg, id, st.current.freq, st.current.channel)) return;
-      const a = audio.current;
       switch (msg.t) {
         case "hello":
           peersRef.current.set(msg.id, {
@@ -193,11 +204,7 @@ export function useRadio() {
           navigator.vibrate?.(40);
           break;
         case "audio":
-          if (!talkers.current.has(msg.id)) {
-            talkers.current.set(msg.id, peersRef.current.get(msg.id)?.name ?? "طرف مقابل");
-            updateRx();
-          }
-          a?.playFrame(msg.id, decodePcm(msg.data));
+          // Do not mix legacy JSON voice with the native v2 stream.
           break;
         case "end":
           endTalk(msg.id);
@@ -225,8 +232,10 @@ export function useRadio() {
 
   // Connect / reconnect transport while powered
   useEffect(() => {
-    if (!power) return;
-    const h = { onMessage: handle, onStatus: setStatus };
+    if (!power || !ready) return;
+    const h = { onMessage: handle, onStatus: setStatus, onAudioError: (message: string) => {
+      talkIntent.current = false; st.current.tx = false; setTx(false); setError(message);
+    } };
     transport.current = createUdpTransport(h);
 
     const beat = setInterval(() => {
@@ -241,6 +250,9 @@ export function useRadio() {
     }, 300);
 
     return () => {
+      talkIntent.current = false;
+      st.current.tx = false;
+      setTx(false);
       clearInterval(beat);
       clearTimeout(first);
       send({ t: "bye", id, freq: st.current.freq, channel: st.current.channel });
@@ -253,10 +265,14 @@ export function useRadio() {
       setPeers([]);
       setGroups([]);
     };
-  }, [power, handle, hello, refreshPeers, send, id, updateNetwork]);
+  }, [power, ready, handle, hello, refreshPeers, send, id, updateNetwork]);
 
   useEffect(() => {
-    if (power) {
+    if (power && ready) {
+      talkIntent.current = false;
+      st.current.tx = false;
+      setTx(false);
+      transport.current?.setChannelCode(channel, freq).then(hello).catch(() => {});
       hello();
       transport.current?.scan().catch(() => {});
       updateNetwork();
@@ -264,7 +280,7 @@ export function useRadio() {
     talkers.current.clear();
     setRx(null);
     audio.current?.rxStatic(false);
-  }, [power, name, freq, channel, groupName, hello, updateNetwork]);
+  }, [power, ready, name, freq, channel, groupName, hello, updateNetwork]);
 
   useEffect(() => {
     const close = () => send({ t: "bye", id, freq: st.current.freq, channel: st.current.channel });
@@ -273,14 +289,14 @@ export function useRadio() {
   }, [id, send]);
 
   const ensureAudio = useCallback(async () => {
+    await prepareNativeAudio();
+    // Web Audio only plays local feedback; never opens a second microphone or sends voice.
     if (!audio.current) {
       audio.current = new RadioAudio();
       audio.current.setVolume(volume);
       audio.current.effect = effect;
     }
-    try {
-      await audio.current.initMic();
-    } catch {}
+    if (audio.current.ctx.state === "suspended") await audio.current.ctx.resume();
     routeToLoudspeaker();
   }, [volume, effect]);
 
@@ -304,15 +320,8 @@ export function useRadio() {
   const scanNetwork = useCallback(async () => {
     setNotice("در حال اسکن تمام آی‌پی‌های هات‌اسپات (Subnet Sweep)…");
     try {
-      const helloJson = JSON.stringify({
-        t: "hello",
-        id,
-        name: st.current.name,
-        freq: st.current.freq,
-        channel: st.current.channel,
-        groupName: st.current.groupName,
-      });
-      await transport.current?.scan(helloJson);
+      hello();
+      await transport.current?.scan();
       hello();
       await updateNetwork();
     } catch {}
@@ -367,64 +376,61 @@ export function useRadio() {
   );
 
   const pttDown = useCallback(async () => {
-    if (!power) {
-      await togglePower();
-      return;
-    }
-    await ensureAudio();
-    const a = audio.current;
-    if (st.current.tx) return;
-    if (talkers.current.size > 0) {
-      a?.busy();
-      navigator.vibrate?.([60, 60, 60]);
+    if (!isNativeApp()) { setError("ارتباط صوتی فقط در برنامه نصب‌شده اندروید فعال است."); return; }
+    if (!power) { await togglePower(); return; }
+    if (st.current.tx || startingTalk.current) return;
+    if (rx || talkers.current.size > 0) {
+      audio.current?.busy();
       setNotice("کانال مشغول است");
       setTimeout(() => setNotice(null), 1500);
       return;
     }
-    setTx(true);
-    navigator.vibrate?.(30);
-    a?.chirp();
-
-    // 1. Send native UDP audio directly from AudioRecord
-    transport.current?.startNativeTx();
-
-    // 2. Also send signaling start
-    send({
-      t: "start",
-      id,
-      name: st.current.name,
-      freq: st.current.freq,
-      channel: st.current.channel,
-    });
-
-    // 3. Web Audio fallback capture
-    a?.startCapture(
-      (pcm) =>
-        send({
-          t: "audio",
-          id,
-          freq: st.current.freq,
-          channel: st.current.channel,
-          data: encodePcm(pcm),
-        }),
-      setLevel,
-    );
-  }, [power, togglePower, ensureAudio, id, send]);
+    talkIntent.current = true;
+    startingTalk.current = true;
+    setError(null);
+    try {
+      await ensureAudio();
+      if (!talkIntent.current) return;
+      const activeTransport = transport.current;
+      if (!activeTransport) throw new Error("ارتباط شبکه آماده نیست.");
+      await activeTransport.startNativeTx();
+      if (!talkIntent.current) { await activeTransport.stopNativeTx(); return; }
+      st.current.tx = true;
+      setTx(true);
+      navigator.vibrate?.(30);
+      send({ t: "start", id, name: st.current.name, freq: st.current.freq, channel: st.current.channel });
+    } catch (failure) {
+      talkIntent.current = false;
+      st.current.tx = false; setTx(false);
+      setError(failure instanceof Error ? failure.message : "ارسال صدا شروع نشد؛ اجازه میکروفون را بررسی کنید.");
+    } finally { startingTalk.current = false; }
+  }, [power, rx, togglePower, ensureAudio, id, send]);
 
   const pttUp = useCallback(() => {
-    const a = audio.current;
+    talkIntent.current = false;
     if (!st.current.tx) return;
+    st.current.tx = false;
     transport.current?.stopNativeTx();
-    a?.stopCapture();
     setTx(false);
     setLevel(0);
     send({ t: "end", id, freq: st.current.freq, channel: st.current.channel });
-    a?.roger();
+    audio.current?.roger();
     navigator.vibrate?.(20);
   }, [id, send]);
 
+  useEffect(() => {
+    const stop = () => { if (document.hidden) pttUp(); };
+    window.addEventListener("blur", pttUp);
+    document.addEventListener("visibilitychange", stop);
+    return () => { window.removeEventListener("blur", pttUp); document.removeEventListener("visibilitychange", stop); };
+  }, [pttUp]);
+
+  useEffect(() => () => audio.current?.close(), []);
+  const analyser = useCallback(() => audio.current?.analyser ?? null, []);
+
   return {
     id,
+    analyser,
     native,
     power,
     name,

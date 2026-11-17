@@ -34,3 +34,6 @@ use the editor.
 - The browser build cannot reach other phones; real calls happen only in the installed Android app.
 - `CAPACITOR=1` makes `vite.config.ts` emit a static SPA in `dist/client` (nitro off) — that is the Capacitor `webDir`; `scripts/build-android.sh` regenerates `android/` and copies the native Java files, so edit `native/android/`, never `android/`.
 - All wire messages go through `src/lib/radio/protocol.ts`; packets carry a per-sender sequence number so duplicates from multiple network paths are dropped.
+- Binary voice uses the versioned `VoiceEngine` native protocol, with session/sequence identity and bounded jitter buffering; JSON signaling stays in `protocol.ts` so duplicate network paths never double-play speech.
+- Capture and playback of remote voice belong exclusively to Android; Web Audio is local feedback only to avoid simultaneous microphones and duplicate voice streams.
+- Audio protocol upgrades require updating every participating phone together; reject legacy binary voice rather than silently mixing incompatible streams.

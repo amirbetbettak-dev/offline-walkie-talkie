@@ -9,7 +9,7 @@ bunx cap sync android
 
 JAVA=android/app/src/main/java
 mkdir -p "$JAVA/com/bisim/udp" "$JAVA/com/bisim/offline"
-cp native/android/BisimUdpPlugin.java "$JAVA/com/bisim/udp/"
+cp native/android/BisimUdpPlugin.java native/android/VoiceEngine.java "$JAVA/com/bisim/udp/"
 cp native/android/MainActivity.java "$JAVA/com/bisim/offline/"
 
 MANIFEST=android/app/src/main/AndroidManifest.xml
